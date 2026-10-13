@@ -1,0 +1,1 @@
+"""SportMatch clubs microservice."""
