@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -16,19 +15,17 @@ from app.schemas.club import (
     ClubProfile,
     ClubSummary,
     ClubUpdate,
-    ConvocatoriaResumen,
-    Deporte,
     Ubicacion,
 )
-from app.services.convocatorias import ConvocatoriasProvider
-
-logger = logging.getLogger(__name__)
+from app.schemas.common import PAGE_SIZE_MAX, Deporte
+from app.schemas.convocatoria import ConvocatoriaFilters, ConvocatoriaRead
+from app.services.authorization import club_not_found, require_managed_club
+from app.services.convocatoria_service import to_convocatoria_read
 
 
 class ClubService:
-    def __init__(self, repository: ClubRepository, convocatorias: ConvocatoriasProvider) -> None:
+    def __init__(self, repository: ClubRepository) -> None:
         self._repository = repository
-        self._convocatorias = convocatorias
 
     # -- public directory (HU-30) ---------------------------------------------
 
@@ -44,7 +41,7 @@ class ClubService:
     def get_profile(self, club_id: UUID) -> ClubProfile:
         club = self._repository.get_club(club_id)
         if club is None:
-            raise _club_not_found()
+            raise club_not_found()
         return ClubProfile(
             **_public_data(club), convocatorias_abiertas=self._open_convocatorias(club.id)
         )
@@ -55,8 +52,7 @@ class ClubService:
     # -- club administration (HU-31) ------------------------------------------
     #
     # Exclusive edition panel: only a representative (club_admin) and only on
-    # the club whose usuario_id is theirs. The route guard (get_club_admin)
-    # already demands the role; it is checked again here so no route can skip it.
+    # the club whose usuario_id is theirs (require_managed_club).
 
     def my_club(self, actor: Actor) -> ClubManaged:
         club = self._repository.get_club_by_owner(actor.id)
@@ -112,29 +108,19 @@ class ClubService:
             )
 
     def _managed_club(self, actor: Actor, club_id: UUID) -> StoredClub:
-        club = self._repository.get_club(club_id, include_inactive=True)
-        if club is None:
-            raise _club_not_found()
-        if actor.is_club_admin and club.usuario_id == actor.id:
-            return club
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No administras este club.")
+        return require_managed_club(self._repository, actor, club_id)
 
     def _club_sports(self, club_id: UUID) -> list[Deporte]:
         club = self._repository.get_club(club_id, include_inactive=True)
         assert club is not None
         return _deportes(club.deportes)
 
-    def _open_convocatorias(self, club_id: UUID) -> list[ConvocatoriaResumen]:
-        # The profile must still load if the convocatorias service is down.
-        try:
-            return self._convocatorias.open_for_club(club_id)
-        except Exception:
-            logger.warning("Could not load convocatorias of club %s", club_id, exc_info=True)
-            return []
-
-
-def _club_not_found() -> HTTPException:
-    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Club no encontrado.")
+    def _open_convocatorias(self, club_id: UUID) -> list[ConvocatoriaRead]:
+        """Soonest first; the full list is in the convocatorias section."""
+        convocatorias, _ = self._repository.search_convocatorias(
+            ConvocatoriaFilters(club_id=club_id, estado="ABIERTA", page_size=PAGE_SIZE_MAX)
+        )
+        return [to_convocatoria_read(c) for c in convocatorias]
 
 
 def _deportes(deportes: list[ClubSport]) -> list[Deporte]:

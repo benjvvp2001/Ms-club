@@ -1,33 +1,58 @@
 from __future__ import annotations
 
+import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.api.v1.clubs import router
-from app.core.config import get_database_settings, get_settings
+from app.api.v1.clubs import router as clubs_router
+from app.api.v1.comunicados import router as comunicados_router
+from app.api.v1.convocatorias import router as convocatorias_router
+from app.api.v1.pagos import router as pagos_router
+from app.api.v1.postulaciones import router as postulaciones_router
+from app.core.config import (
+    WebpaySettings,
+    get_database_settings,
+    get_settings,
+    get_users_service_settings,
+    get_webpay_settings,
+)
 from app.database.session import check_connection, create_pool
 from app.repositories.base import ClubRepository
 from app.repositories.postgres_club_repository import PostgresClubRepository
-from app.services.convocatorias import ConvocatoriasProvider, NoConvocatorias
+from app.services.users_client import AthleteProfiles, UsersClient
+from app.services.webpay import WebpayGateway, build_webpay
+
+
+def _finite_or_text(value: float):
+    """A number such as 1e999 reaches validation as infinity, which JSON cannot carry: the error
+    message that echoes the received value would fail to serialize and answer 500 instead of 422."""
+    return value if math.isfinite(value) else str(value)
 
 
 def create_app(
     repository: ClubRepository | None = None,
-    convocatorias: ConvocatoriasProvider | None = None,
+    users: AthleteProfiles | None = None,
+    webpay: WebpayGateway | None = None,
+    webpay_settings: WebpaySettings | None = None,
 ) -> FastAPI:
     """Create the service without routes outside the approved clubs prefix.
 
     With no repository given, the service checks the PostgreSQL connection
     (DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME) and opens the pool on
     server startup, not at import time; it refuses to start if that fails. Tests
-    inject a MockClubRepository instead so they don't need a live database.
+    inject a MockClubRepository instead so they don't need a live database, and a
+    fake users source so applying never calls Ms_Users. The same goes for the
+    Webpay gateway (WEBPAY_* variables): tests inject a MockWebpay.
     """
     owns_pool = repository is None
+    owns_users = users is None
+    owns_webpay = webpay is None
     pool_holder: dict[str, object] = {}
 
     @asynccontextmanager
@@ -39,9 +64,25 @@ def create_app(
             pool = create_pool(settings.conninfo())
             pool_holder["pool"] = pool
             app.state.repository = PostgresClubRepository(pool)
+        http_client = None
+        if owns_users:
+            users_settings = get_users_service_settings()
+            http_client = httpx.Client(
+                base_url=users_settings.url,
+                timeout=users_settings.timeout_seconds,
+                trust_env=False,
+            )
+            app.state.users = UsersClient(http_client)
+        if owns_webpay:
+            app.state.webpay_settings = get_webpay_settings()
+            app.state.webpay = build_webpay(app.state.webpay_settings)
         try:
             yield
         finally:
+            if owns_webpay and getattr(app.state, "webpay", None) is not None:
+                app.state.webpay.close()
+            if http_client is not None:
+                http_client.close()
             pool = pool_holder.get("pool")
             if pool is not None:
                 pool.close()  # type: ignore[attr-defined]
@@ -55,14 +96,19 @@ def create_app(
     )
     if repository is not None:
         app.state.repository = repository
-    app.state.convocatorias = convocatorias or NoConvocatorias()
+    if users is not None:
+        app.state.users = users
+    if webpay is not None:
+        app.state.webpay = webpay
+    if webpay_settings is not None:
+        app.state.webpay_settings = webpay_settings
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, error: RequestValidationError) -> JSONResponse:
         # Invalid search or path parameters are a client error: 400, not 422.
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content={"detail": jsonable_encoder(error.errors())},
+            content={"detail": jsonable_encoder(error.errors(), custom_encoder={float: _finite_or_text})},
         )
 
     @app.get("/api/v1/clubs/health/ready", tags=["health"])
@@ -76,7 +122,13 @@ def create_app(
                 raise HTTPException(status_code=503, detail="clubs database unavailable") from error
         return {"status": "ready", "service": "ms_club"}
 
-    app.include_router(router)
+    # Convocatorias, postulaciones and comunicados first: their fixed paths
+    # (/announcements, /notices/me) must not be read as the {club_id} of the clubs routes.
+    app.include_router(postulaciones_router)
+    app.include_router(comunicados_router)
+    app.include_router(pagos_router)
+    app.include_router(convocatorias_router)
+    app.include_router(clubs_router)
 
     return app
 

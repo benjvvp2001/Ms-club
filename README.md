@@ -1,28 +1,49 @@
 # ms-club — servicio de clubes de SportMatch
 
-Directorio y perfiles públicos de clubes deportivos (HU-30) y administración del
-perfil por el representante del club (HU-31). Misma arquitectura que `Ms_Users`:
+Directorio y perfiles públicos de clubes deportivos (HU-30), administración del
+perfil por el representante del club (HU-31), convocatorias a pruebas de
+jugadores (HU-32), postulación de deportistas a esas convocatorias (HU-33) y
+revisión de candidatos por el club, con aviso al deportista (HU-34) y comunicados
+de los clubes a sus postulantes y miembros (HU-38) y pago de planes con Webpay Plus
+(HU-40). Misma arquitectura que `Ms_Users`:
 FastAPI + Pydantic v2, PostgreSQL con psycopg 3 (pool, sin ORM), capas
 `api → services → repositories`, JWT emitido por `Ms_Users`.
 
 Trabaja sobre las tablas existentes de la base `sportmatch_clubs` (`club`,
 `deporte`, `club_deporte`). La migración `001_club_profile_admin.sql` agrega a
-`club` los campos del perfil que edita el representante.
+`club` los campos del perfil que edita el representante y
+`002_convocatorias.sql` crea la tabla `convocatoria` (un club, muchas convocatorias)
+`003_postulaciones.sql` la tabla `postulacion_convocatoria` y
+`004_revision_postulaciones.sql` los estados de revisión y el outbox de notificaciones y
+`005_comunicados.sql` las tablas de comunicados y `006_pagos.sql` planes, pagos y
+suscripciones.
 
 ```
 app/
   main.py                 create_app(): pool PostgreSQL en el arranque, o repositorio inyectado (tests)
-  api/v1/clubs.py         rutas /api/v1/clubs
+  api/v1/clubs.py         rutas de clubes (/api/v1/clubs)
+  api/v1/convocatorias.py rutas de convocatorias (/api/v1/clubs/announcements, /{id}/announcements)
+  api/v1/postulaciones.py rutas de postulaciones y candidatos (/announcements/{id}/applications,
+                          /announcements/applications/me, /announcements/applications/{id})
+  api/v1/pagos.py         pagos con Webpay Plus (/api/v1/payments)
   api/dependencies.py     inyección de repositorio y servicio; usuario autenticado (Bearer)
-  core/config.py          DB_* y JWT_*
+  core/config.py          DB_*, JWT_*, USERS_* y WEBPAY_*
   core/security.py        validación del JWT de Ms_Users y roles (club_admin, admin)
   database/               comprobación de conexión al arranque, pool y migrador
   repositories/           contrato ClubRepository + PostgreSQL + mock en memoria
-  schemas/club.py         DTOs: filtros, ClubCreate, ClubUpdate y respuestas
-  services/               ClubService (reglas y permisos) y el contrato ConvocatoriasProvider
+  schemas/                common.py (compartido), club.py (ClubCreate, ClubUpdate...),
+                          convocatoria.py (ConvocatoriaCreate, filtros, respuestas),
+                          postulacion.py (PostulacionCreate, PostulacionEstadoUpdate, candidatos),
+                          pago.py (PagoIniciar, PagoConfirmar, comprobante, suscripción)
+  services/               ClubService, ConvocatoriaService, PostulacionService,
+                          PagoService, authorization.py (dueño del club), users_client.py (Ms_Users)
+                          y webpay.py (adaptador de Transbank y modo simulado)
 db/
   00_create_database.sql  rol sportmatch_clubs (una vez, en pgAdmin)
-  migrations/             001: campos del perfil y permisos de escritura (como postgres)
+  migrations/             001: perfil; 002: convocatoria; 003: postulaciones; 004: revisión y outbox;
+                          005: comunicados; 006: planes, pagos y suscripciones
+  seeds/demo_planes.sql   planes de PRUEBA para desarrollo (no son el catálogo real)
+                          (todas como postgres)
 tests/                    pruebas de la API con el repositorio mock
 ```
 
@@ -38,6 +59,22 @@ tests/                    pruebas de la API con el repositorio mock
 | PATCH | `/api/v1/clubs/{id}` | `club_admin` dueño | Edita el perfil y los deportes ofrecidos. |
 | PUT | `/api/v1/clubs/{id}/deportes/{deporte_id}` | `club_admin` dueño | Asocia un deporte (idempotente). |
 | DELETE | `/api/v1/clubs/{id}/deportes/{deporte_id}` | `club_admin` dueño | Quita un deporte (idempotente). |
+| GET | `/api/v1/clubs/announcements` | Público | Sección de convocatorias (por defecto, abiertas). |
+| GET | `/api/v1/clubs/announcements/{id}` | Público | Detalle de una convocatoria. |
+| POST | `/api/v1/clubs/{id}/announcements` | `club_admin` dueño | Publica una convocatoria del club. |
+| POST | `/api/v1/clubs/{id}/announcements/{convocatoria_id}/close` | `club_admin` dueño | Cierra una convocatoria antes de su fecha. |
+| POST | `/api/v1/clubs/announcements/{convocatoria_id}/applications` | Deportista | Postula a una convocatoria abierta. |
+| GET | `/api/v1/clubs/announcements/applications/me` | Deportista | Historial y estado de mis postulaciones. |
+| GET | `/api/v1/clubs/announcements/{convocatoria_id}/applications` | `club_admin` dueño | Candidatos de la convocatoria. |
+| PATCH | `/api/v1/clubs/announcements/applications/{postulacion_id}` | `club_admin` dueño | Cambia el estado de un candidato y avisa al deportista. |
+| POST | `/api/v1/clubs/{id}/notices` | `club_admin` dueño | Publica un comunicado y notifica a su audiencia. |
+| GET | `/api/v1/clubs/{id}/notices` | `club_admin` dueño | Comunicados que publicó el club, con a cuántos llegó cada uno. |
+| GET | `/api/v1/clubs/notices/me` | Deportista | Mi bandeja de comunicados. |
+| GET | `/api/v1/payments/plans` | Público | Planes disponibles. |
+| POST | `/api/v1/payments/webpay/initiate` | Autenticado | Inicia el pago de un plan. |
+| POST | `/api/v1/payments/webpay/commit` | Autenticado | Confirma el pago al volver de Webpay. |
+| GET | `/api/v1/payments/subscription/me` | Autenticado | Mi suscripción (deportista o club). |
+| GET, POST | `/api/v1/payments/webpay/return` | Navegador | Retorno de Webpay: reenvía a la app. |
 | GET | `/api/v1/clubs/health/ready` | Público | Health check (consulta la base). |
 
 ### Directorio (HU-30)
@@ -99,20 +136,227 @@ de SportMatch), `fecha_creacion` y `fecha_actualizacion`.
 - `404` club inexistente (o inactivo, en las rutas públicas) o deporte inexistente/inactivo.
 - `409` el representante ya administra un club.
 
-## Convocatorias
+## Convocatorias (HU-32)
 
-Las convocatorias no se guardan en este servicio. El perfil las pide a un
-`ConvocatoriasProvider` (`app/services/convocatorias.py`) por id de club. Por
-ahora se usa `NoConvocatorias`, que devuelve una lista vacía; cuando el servicio
-dueño exponga convocatorias por club, se implementa un cliente HTTP con ese
-contrato y se pasa a `create_app(convocatorias=...)`. Si ese servicio falla, el
-perfil igual responde, con `convocatorias_abiertas: []`.
+El representante dueño del club publica pruebas masivas o de jugadores con
+`POST /api/v1/clubs/{club_id}/announcements` (mismo control de acceso que la
+HU-31). `ConvocatoriaCreate`:
+
+| Campo | Obligatorio | Validación |
+| --- | --- | --- |
+| `deporte_id` | Sí | Deporte activo del catálogo que el club ofrece |
+| `categoria_edad` | Sí | Texto 2–40 (`Sub-17`, `Adulto`, `+35`, `14 a 18 años`) |
+| `edad_minima`, `edad_maxima` | No | 4–99, mínima ≤ máxima; las usa el filtro `edad` |
+| `fecha_prueba` | Sí | Fecha y hora con zona horaria (`2026-11-07T10:00:00-03:00`), futura y a no más de 365 días |
+| `requisitos` | Sí | Lista de 1 a 15 textos (2–200) |
+| `cupos` | Sí | Entero 1–1000 |
+| `direccion` | Sí | Texto 5–255 |
+| `comuna` | No | Mismo formato que en el club |
+| `titulo` | No | Texto 3–120 |
+| `descripcion` | No | Hasta 2000 |
+
+Estado, calculado al leer (no se guarda, así cambia solo al pasar la fecha):
+
+- `FINALIZADA`: la fecha de la prueba ya pasó.
+- `CERRADA`: el club la cerró antes de esa fecha (`.../close`, idempotente; sobre una finalizada responde 409).
+- `ABIERTA`: en otro caso.
+
+`GET /api/v1/clubs/announcements` es la sección pública. Por defecto lista las
+`ABIERTA`, la más próxima primero (las `FINALIZADA`, la más reciente primero).
+Filtros opcionales y combinables: `deporte` (nombre, sin mayúsculas ni tildes),
+`deporte_id`, `categoria` (parcial), `edad` (convocatorias cuyo rango la admite o
+sin rango), `club_id`, `fecha_desde` y `fecha_hasta` (días en hora de Chile,
+inclusive), `estado`, `page` y `page_size`. El perfil del club muestra sus
+convocatorias abiertas en `convocatorias_abiertas`. Las convocatorias de clubes
+inactivos no se muestran, y un club inactivo no puede publicar (409).
+
+Errores propios: `400` fecha pasada, sin zona horaria o lejana, cupos ≤ 0,
+faltan campos obligatorios, deporte inexistente o que el club no ofrece; `401`
+sin token; `403` sin rol `club_admin` o club ajeno; `404` club o convocatoria
+inexistente; `409` club inactivo o convocatoria finalizada.
+
+## Postulaciones (HU-33)
+
+Solo deportistas (roles `player` o `usuario` del token, como en Ms_Users)
+postulan con `POST /api/v1/clubs/announcements/{convocatoria_id}/applications`.
+`PostulacionCreate` (todo opcional):
+
+- `mensaje`: presentación, hasta 1000 caracteres.
+- `antecedentes`: hasta 10 entradas `{institucion, deporte, anio_inicio, anio_fin?, logros?}`
+  (años desde 1950 y no futuros; `anio_fin` vacío = sigue ahí).
+
+El **perfil deportivo** no lo envía el deportista: ms-club pide a Ms_Users la
+tarjeta pública del propio deportista con su token (`GET /api/v1/users/athletes/{id}`)
+y guarda una copia fija en `perfil_deportivo` (nombre, inicial del apellido,
+edad, foto, biografía y deportes con nivel). Así el club ve lo que se envió, y
+Ms_Users solo entrega tarjetas de deportistas activos con correo verificado.
+
+Reglas, en este orden:
+
+1. La convocatoria existe y su club está activo; si no, `404`.
+2. Está `ABIERTA`; si está `CERRADA` o `FINALIZADA`, `409`.
+3. Ms_Users entrega el perfil: `403` si la cuenta no puede (por ejemplo, correo
+   sin verificar), `503` si Ms_Users no responde.
+4. Si la convocatoria tiene rango numérico de edad y se conoce la edad del
+   deportista, debe estar dentro; si no, `409`.
+5. No había postulado antes; si no, `409`.
+6. Quedan cupos: cada postulación que no está `RECHAZADO` ocupa uno; si no, `409`.
+
+Los pasos 2, 5 y 6 se repiten dentro de la transacción del `INSERT`, con la fila de
+la convocatoria bloqueada (`FOR UPDATE`), así dos postulaciones simultáneas no
+toman el mismo último cupo. La respuesta `201` trae el `id` y `estado: PENDIENTE`.
+
+`GET /api/v1/clubs/announcements/applications/me` lista las postulaciones del
+deportista, la más reciente primero, con su convocatoria, su estado y el
+`comentario_club` que haya dejado el club. Filtro opcional `estado`, más `page` y
+`page_size`. Las convocatorias ahora informan `cupos_disponibles`.
+
+## Revisión de candidatos (HU-34)
+
+Estados de una postulación: `PENDIENTE` (inicial), `PRESELECCIONADO`, `ACEPTADO`,
+`RECHAZADO`, sin tildes como los demás valores de la API. `PRESELECCIONADO`
+reemplazó al `EN_REVISION` de la HU-33 (la migración 004 convierte las filas).
+
+Solo el `club_admin` dueño del club de la convocatoria (mismo control que la
+HU-31: `401` sin token, `403` otro rol u otro club, incluido `admin`). Funciona
+aunque el club esté inactivo o la prueba ya haya pasado: la selección se
+confirma después de la prueba.
+
+- `GET /api/v1/clubs/announcements/{convocatoria_id}/applications`: la
+  convocatoria y sus candidatos, el más antiguo primero, con `usuario_id`,
+  `estado`, `perfil_deportivo` (copia adjunta al postular), `mensaje`,
+  `antecedentes`, `comentario_club` y `fecha_postulacion`. Filtro opcional
+  `estado`, `page`, `page_size`, y `conteo_por_estado` de toda la convocatoria.
+- `PATCH /api/v1/clubs/announcements/applications/{postulacion_id}` con
+  `PostulacionEstadoUpdate` (el `UpdateApplicationStatusDto`):
+  `{"estado": "PRESELECCIONADO" | "ACEPTADO" | "RECHAZADO", "comentario": "..."}`.
+  `comentario` (hasta 1000) lo lee el deportista; si no se envía se mantiene, y
+  `null` lo borra. No se puede volver a `PENDIENTE`. Responde `200` con el candidato.
+  Pasar desde `RECHAZADO` a otro estado vuelve a ocupar un cupo: `409` si no hay.
+  `404` si la postulación no existe.
+
+### Aviso al deportista
+
+Si el estado cambia, el mismo `UPDATE` escribe, en la misma transacción, un
+evento en `clubs_api.notification_outbox`: el patrón de Matching y Actividades
+(ver `Ms_gateway/docs/notificaciones.md`). El worker del gateway lo pasa a la
+bandeja del deportista y lo envía por push. Repetir el mismo estado no genera
+otro aviso. El evento lleva `kind: "convocatoria"`, un título y texto según el
+estado (sin el comentario del club, porque la alerta puede verse en la pantalla
+bloqueada) y `data: {screen: "convocatoria", convocatoriaId, postulacionId, estado}`.
+Para que llegue, el gateway debe leer este outbox (ver `PENDIENTES.md`).
+
+## Comunicados de clubes (HU-38)
+
+Un club avisa a los deportistas vinculados a él. Las rutas viven bajo `/notices`
+porque `/announcements` ya es de las convocatorias (HU-32).
+
+`POST /api/v1/clubs/{club_id}/notices` (solo el `club_admin` dueño, mismo control
+que la HU-31; `404` si el club no existe, `409` si está inactivo) recibe
+`ComunicadoCreate` (el `CreateAnnouncementDto`):
+
+| Campo | Obligatorio | Validación |
+| --- | --- | --- |
+| `titulo` | Sí | 3–120 caracteres |
+| `contenido` | Sí | 5–2000 caracteres |
+| `audiencia` | Sí | `TODOS`, `POSTULANTES` o `MIEMBROS` |
+| `prioridad` | No | `NORMAL` (por defecto) o `URGENTE` |
+
+Respuesta `201` con el comunicado y `destinatarios` (a cuántos deportistas llegó).
+
+**Audiencia.** No hay tabla de seguidores ni suscriptores, así que se define por el
+estado de las postulaciones a las convocatorias del club:
+
+- `POSTULANTES`: postulaciones en curso (`PENDIENTE` o `PRESELECCIONADO`).
+- `MIEMBROS`: deportistas aceptados (`ACEPTADO`), es decir, confirmados.
+- `TODOS`: la comunidad del club, ambos grupos. Los `RECHAZADO` nunca reciben avisos.
+
+Un deportista aceptado en una convocatoria y pendiente en otra pertenece a las dos
+audiencias, y recibe un solo aviso por comunicado.
+
+**Destinatarios fijos.** La audiencia se resuelve al publicar y se guarda
+(`comunicado_destinatario`). La bandeja muestra exactamente lo que se notificó:
+quien se postula después no recibe los comunicados anteriores, y quien cambia de
+estado conserva los que ya recibió.
+
+**Notificación.** En la misma transacción que el comunicado se escribe un evento por
+destinatario en `clubs_api.notification_outbox` (el mecanismo de la HU-34; ver
+`Ms_gateway/docs/notificaciones.md`): `kind: "comunicado"`, título del comunicado
+(con el prefijo `Urgente:` si lo es), texto `"{club}: {primeros 120 caracteres}"` y
+`data: {screen: "comunicado", comunicadoId, clubId, prioridad}`. El texto completo se
+lee en la app, no en la alerta. Si algo falla, no queda comunicado ni notificaciones.
+
+`GET /api/v1/clubs/notices/me` (solo deportistas) es la bandeja: los comunicados
+dirigidos al deportista, el más reciente primero. Filtros opcionales `club_id`,
+`prioridad`, `page` y `page_size`. `GET /api/v1/clubs/{club_id}/notices` lista lo que
+publicó el club (filtros `audiencia` y `prioridad`). Los comunicados no se editan ni
+se borran.
+
+## Pagos con Webpay Plus (HU-40)
+
+Un deportista o un club contrata un plan y paga con Webpay Plus. Las tablas son
+nuevas y propias de este servicio (`plan_suscripcion`, `transaccion_pago`,
+`suscripcion`); no usan las `plan`/`membresia`/`pago` que existen en la base
+`sportmatch_users`.
+
+**Flujo**
+
+1. `GET /api/v1/payments/plans` lista los planes (precio en pesos chilenos).
+2. `POST /api/v1/payments/webpay/initiate` con `{"plan_id": 1}` (`PagoIniciar`, el
+   `InitiatePaymentDto`). Responde `201` con `token_ws`, `url`, `buy_order`,
+   `session_id`, `amount` y `status: "PENDING"`, y registra la transacción.
+   El comprador sale del token (un deportista paga por sí mismo; un `club_admin`,
+   por su club) y el monto es el precio del plan: ninguno viaja en la petición.
+3. La app envía al navegador a `url` con un formulario **POST** de un solo campo,
+   `token_ws` (así lo exige Transbank), sin iframe.
+4. Webpay devuelve al usuario a `/api/v1/payments/webpay/return`, que lo reenvía
+   (303) a `WEBPAY_FRONTEND_RETURN_URL` con los parámetros como query:
+   `token_ws` si pasó por el formulario; `tbk_token`, `tbk_orden_compra` y
+   `tbk_id_sesion` si canceló; solo los dos últimos si se agotó el tiempo.
+5. La app llama a `POST /api/v1/payments/webpay/commit` con esos parámetros
+   (`PagoConfirmar`, el `CommitPaymentDto`) y la sesión del usuario.
+
+**Resultado de `commit`**
+
+| Caso | Respuesta | Transacción | Suscripción |
+| --- | --- | --- | --- |
+| Aprobado (`response_code == 0` y `status == AUTHORIZED`) | `200` con el comprobante y la `suscripcion` | `APPROVED` | Se crea o se extiende `duracion_dias` del plan |
+| Rechazado por el emisor o Webpay | `400`, `detail` y `transaccion` (comprobante) | `REJECTED` | Sin cambios |
+| Cancelado o tiempo agotado (`tbk_*`) | `400`, igual | `CANCELLED` | Sin cambios |
+| Webpay no responde, o responde otra orden o monto | `502` | Sigue `PENDING` | Sin cambios |
+| Transacción inexistente o de otra cuenta | `404` | Sin cambios | Sin cambios |
+
+Confirmar dos veces la misma transacción devuelve el mismo resultado sin volver a
+llamar a Webpay, ni cobrar, ni extender la suscripción. Solo la cuenta que inició
+el pago puede confirmarlo.
+
+**Suscripción.** Una por deportista o club. Pagar el mismo plan estando vigente suma
+los días al fin actual; si ya venció, parte desde hoy. Con otro plan vigente se
+rechaza al iniciar (`409`), para no perder días ya pagados. El estado `ACTIVE`/`EXPIRED`
+se calcula al leer: nada tiene que correr cuando vence. `GET /subscription/me` la
+muestra. Un plan `USUARIO` solo lo compran deportistas y uno `CLUB`, representantes
+con un club creado.
+
+**Modo de pruebas.** `WEBPAY_MOCK_MODE=true` reemplaza a Webpay por una página
+simulada de este servicio (`/api/v1/payments/webpay/mock`) con tres botones: pagar,
+simular rechazo y anular. No cobra nada y aprueba lo que el usuario elija, así que el
+servicio **no arranca** si se combina con `WEBPAY_ENVIRONMENT=PRODUCTION`. Con
+`false` (el valor por defecto) se usa el adaptador `TransbankWebpay`, que en
+`INTEGRATION` emplea las credenciales públicas de prueba de Transbank. Para usar el
+SDK oficial, se implementa `WebpayGateway` (`create_transaction`,
+`commit_transaction`) y se pasa a `create_app()`; nada más cambia.
 
 ## Base de datos y ejecución
 
 Variables en `.env` (ver `.env.example`): `DB_HOST`, `DB_PORT`, `DB_USER`,
-`DB_PASSWORD`, `DB_NAME` (por defecto `sportmatch_clubs`) y `JWT_SECRET`,
-`JWT_ISSUER`, `JWT_AUDIENCE`, que deben ser los mismos de Ms_Users. Igual que
+`DB_PASSWORD`, `DB_NAME` (por defecto `sportmatch_clubs`), `JWT_SECRET`,
+`JWT_ISSUER`, `JWT_AUDIENCE`, que deben ser los mismos de Ms_Users, y
+`USERS_SERVICE_URL` (por defecto `http://127.0.0.1:8001`) y `USERS_TIMEOUT_SECONDS`
+para pedir el perfil deportivo a Ms_Users. Para postular, Ms_Users debe estar
+corriendo; el resto del servicio no lo necesita. Los pagos usan `WEBPAY_MOCK_MODE`,
+`WEBPAY_ENVIRONMENT`, `WEBPAY_COMMERCE_CODE`, `WEBPAY_API_KEY`, `WEBPAY_PUBLIC_URL`,
+`WEBPAY_FRONTEND_RETURN_URL` y `WEBPAY_TIMEOUT_SECONDS` (ver `.env.example`); las
+primeras dos URL son obligatorias y la API key nunca se registra en logs. Igual que
 Ms_Users, el `.env` se carga con `--env-file` de uvicorn.
 
 Al arrancar, el servicio valida la configuración JWT, se conecta una vez a
@@ -124,6 +368,12 @@ Una vez, en pgAdmin conectado a `sportmatch_clubs` como `postgres`, en este orde
 
 1. `db/00_create_database.sql` (reemplazar el password por `DB_PASSWORD` del `.env`).
 2. `db/migrations/001_club_profile_admin.sql`.
+3. `db/migrations/002_convocatorias.sql`.
+4. `db/migrations/003_postulaciones.sql`.
+5. `db/migrations/004_revision_postulaciones.sql`.
+6. `db/migrations/005_comunicados.sql`.
+7. `db/migrations/006_pagos.sql`.
+8. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
 
 ```bash
 pip install -e ".[dev]"

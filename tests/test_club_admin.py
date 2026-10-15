@@ -384,3 +384,15 @@ def test_token_signed_with_another_secret_is_rejected():
     )
     response = client.get(f"{CLUBS_PATH}/me", headers={"Authorization": f"Bearer {forged}"})
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize("field", ["latitud", "longitud"])
+def test_an_infinite_number_is_a_400_not_a_server_error(field):
+    """1e999 arrives as infinity and used to make the error response itself fail (500)."""
+    client, _ = make_client()
+    coordinates = {"latitud": 0, "longitud": 0, field: "__INF__"}
+    body = '{"nombre": "Club", "latitud": %s, "longitud": %s}' % (
+        "1e999" if field == "latitud" else "0", "1e999" if field == "longitud" else "0")
+    response = client.post(CLUBS_PATH, headers={**token(uuid4()), "Content-Type": "application/json"}, content=body)
+    assert response.status_code == 400
+    assert response.json()["detail"][0]["loc"][-1] == field

@@ -4,32 +4,18 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import EmailStr, Field, field_validator, model_validator
 
-PAGE_SIZE_MAX = 50
+from app.schemas.common import PAGE_SIZE_MAX, PLACE_PATTERN, APIModel, Deporte, blank_is_none
+from app.schemas.convocatoria import ConvocatoriaRead
+
 DESCRIPCION_CORTA_MAX = 160
-
-_LETTERS = "A-Za-zÁÉÍÓÚÜÑáéíóúüñ"
-# Same comuna rule as Ms_Users: "Ñuñoa", "O'Higgins", "Pedro Aguirre Cerda", "Til-Til".
-PLACE_PATTERN = rf"^[{_LETTERS}.]+(?:[ '-][{_LETTERS}.]+)*$"
 PHONE_PATTERN = r"^\+?[0-9][0-9 ()-]{6,19}$"
 HTTPS_URL_PATTERN = r"^https://\S+$"
 HTTP_URL_PATTERN = r"^https?://\S+$"
 EMAIL_MAX_LENGTH = 100
 ESTADOS_VERIFICACION = ("pendiente", "verificado", "rechazado")
 DEPORTES_MAX = 30
-
-# Sport names are compared without case or accents, so "futbol" finds "Fútbol".
-_ACCENTS = str.maketrans("áéíóúüñ", "aeiouun")
-
-
-def fold_name(text: str) -> str:
-    """Python twin of the SQL translate(lower(...)) used by the repository."""
-    return text.strip().lower().translate(_ACCENTS)
-
-
-class APIModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
 class ClubFilters(APIModel):
@@ -81,10 +67,8 @@ class _ClubFields(APIModel):
         "email_contacto", "sitio_web", "logo", "portada", mode="before",
     )
     @classmethod
-    def blank_is_none(cls, value: object) -> object:
-        if isinstance(value, str) and not value.strip():
-            return None
-        return value
+    def optional_text(cls, value: object) -> object:
+        return blank_is_none(value)
 
     @field_validator("deporte_ids")
     @classmethod
@@ -146,29 +130,12 @@ class ClubUpdate(_ClubFields):
 # -- responses ----------------------------------------------------------------
 
 
-class Deporte(APIModel):
-    id: int
-    nombre: str
-    descripcion: str | None = None
-
-
 class Ubicacion(APIModel):
     direccion: str | None
     comuna: str | None
     provincia: str | None
     latitud: float | None
     longitud: float | None
-
-
-class ConvocatoriaResumen(APIModel):
-    """Open call published by the club. Owned by the activities/convocatorias
-    service; the profile only shows this summary."""
-
-    id: UUID
-    titulo: str
-    deporte: str
-    fecha_inicio: datetime
-    cupos_disponibles: int | None = None
 
 
 class ClubSummary(APIModel):
@@ -212,7 +179,7 @@ class _ClubPublicData(APIModel):
 class ClubProfile(_ClubPublicData):
     """Public profile of a club."""
 
-    convocatorias_abiertas: list[ConvocatoriaResumen]
+    convocatorias_abiertas: list[ConvocatoriaRead]
 
 
 class ClubManaged(_ClubPublicData):

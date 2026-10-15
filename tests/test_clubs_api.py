@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 import pytest
@@ -9,7 +9,7 @@ import pytest
 from app.main import create_app
 from app.repositories.base import ClubSport, StoredClub
 from app.repositories.mock_club_repository import MockClubRepository
-from app.schemas.club import ClubFilters, ConvocatoriaResumen
+from app.schemas.club import ClubFilters
 
 CLUBS_PATH = "/api/v1/clubs"
 
@@ -19,24 +19,11 @@ PADEL = ClubSport(3, "Pádel")
 NATACION_INACTIVO = ClubSport(4, "Natación", is_active=False)
 
 
-class FakeConvocatorias:
-    def __init__(self) -> None:
-        self.by_club: dict[UUID, list[ConvocatoriaResumen]] = {}
-
-    def open_for_club(self, club_id: UUID) -> list[ConvocatoriaResumen]:
-        return self.by_club.get(club_id, [])
-
-
-class BrokenConvocatorias:
-    def open_for_club(self, club_id: UUID) -> list[ConvocatoriaResumen]:
-        raise ConnectionError("convocatorias service down")
-
-
 def club(nombre: str, direccion: str | None = None, **extra: object) -> StoredClub:
     return StoredClub(id=uuid4(), nombre=nombre, direccion=direccion, **extra)
 
 
-def make_client(convocatorias: object | None = None) -> tuple[TestClient, MockClubRepository]:
+def make_client() -> tuple[TestClient, MockClubRepository]:
     repository = MockClubRepository(
         [
             club(
@@ -55,7 +42,7 @@ def make_client(convocatorias: object | None = None) -> tuple[TestClient, MockCl
             club("Club Cerrado", "Ñuñoa", deportes=[FUTBOL], is_active=False),
         ]
     )
-    client = TestClient(create_app(repository=repository, convocatorias=convocatorias))
+    client = TestClient(create_app(repository=repository))
     return client, repository
 
 
@@ -140,18 +127,20 @@ def test_invalid_search_parameters_are_rejected_with_400(params):
 
 
 def test_profile_returns_public_data_and_open_convocatorias():
-    convocatorias = FakeConvocatorias()
-    client, repository = make_client(convocatorias)
+    client, repository = make_client()
     nunoa = find(repository, "Club Deportivo Ñuñoa")
-    convocatorias.by_club[nunoa.id] = [
-        ConvocatoriaResumen(
-            id=uuid4(),
-            titulo="Selección sub-18",
-            deporte="Fútbol",
-            fecha_inicio=datetime(2026, 11, 2, 18, tzinfo=timezone.utc),
-            cupos_disponibles=4,
-        )
-    ]
+    repository.create_convocatoria(
+        nunoa.id,
+        {
+            "deporte_id": FUTBOL.id,
+            "titulo": "Selección sub-18",
+            "categoria_edad": "Sub-18",
+            "fecha_prueba": datetime.now(timezone.utc) + timedelta(days=10),
+            "requisitos": ["Ficha médica"],
+            "cupos": 4,
+            "direccion": "Av. Grecia 2001",
+        },
+    )
 
     response = client.get(f"{CLUBS_PATH}/{nunoa.id}")
     assert response.status_code == 200, response.text
@@ -182,13 +171,6 @@ def test_profile_of_missing_or_inactive_club_is_404():
 def test_profile_with_malformed_id_is_400(ref):
     client, _ = make_client()
     assert client.get(f"{CLUBS_PATH}/{ref}").status_code == 400
-
-
-def test_profile_still_loads_when_convocatorias_service_fails():
-    client, repository = make_client(BrokenConvocatorias())
-    response = client.get(f"{CLUBS_PATH}/{find(repository, 'Tenis Providencia').id}")
-    assert response.status_code == 200
-    assert response.json()["convocatorias_abiertas"] == []
 
 
 def test_directory_is_public_and_health_is_ready():

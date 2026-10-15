@@ -11,6 +11,39 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
   defecto) y `fecha_actualizacion`, más el índice `club_usuario_idx`.
 - `deporte`: catálogo (`id`, `nombre`, `descripcion`, `is_active`). El servicio solo lo lee.
 - `club_deporte`: deportes de cada club; el representante los agrega y quita.
+- `convocatoria` (migración 002): pruebas que publica un club (`club_id` → `club`,
+  `deporte_id` → `deporte`). Guarda `cerrada_en` cuando el club la cierra; el
+  estado (`ABIERTA`, `CERRADA`, `FINALIZADA`) se calcula al leer con `now()`.
+  `requisitos` es `varchar(200)[]`. La tabla repite como `CHECK` los límites del
+  DTO (cupos 1–1000, edades 4–99, 1 a 15 requisitos).
+- `postulacion_convocatoria` (migración 003): postulaciones de deportistas
+  (`convocatoria_id` → `convocatoria`; `usuario_id` es la cuenta de Ms_Users, sin FK
+  por ser otra base). `UNIQUE (convocatoria_id, usuario_id)`. `estado` en
+  `PENDIENTE`, `PRESELECCIONADO`, `ACEPTADO`, `RECHAZADO` (la 004 reemplazó
+  `EN_REVISION` por `PRESELECCIONADO`). `antecedentes` (jsonb, arreglo),
+  `perfil_deportivo` (jsonb, copia de la tarjeta de Ms_Users al postular) y
+  `comentario_club` (004, retroalimentación del club).
+- `comunicado_club` (migración 005): comunicados de un club (`club_id` → `club`,
+  `titulo`, `contenido`, `audiencia` en `TODOS`/`POSTULANTES`/`MIEMBROS`, `prioridad`
+  en `NORMAL`/`URGENTE`, `fecha_creacion`).
+- `comunicado_destinatario` (migración 005): los deportistas que recibieron cada
+  comunicado (`usuario_id` es la cuenta de Ms_Users, sin FK). Se llena al publicar y
+  alimenta la bandeja del deportista.
+- `plan_suscripcion` (migración 006): catálogo de planes (`tipo` `USUARIO` o `CLUB`,
+  `precio` en pesos enteros, `duracion_dias`). El servicio solo lo lee; los planes y
+  precios reales los define SportMatch (`seeds/demo_planes.sql` trae dos de PRUEBA).
+- `transaccion_pago` (006): un intento de pago, desde que se crea la transacción en
+  Webpay (`PENDING`) hasta `APPROVED`, `REJECTED` o `CANCELLED`. Comprador: `usuario_id`
+  (cuenta de Ms_Users, sin FK) o `club_id`, exactamente uno. `iniciada_por` es la cuenta
+  que puede confirmarla. `buy_order` y `token_ws` son únicos. De la tarjeta solo se
+  guardan los últimos 4 dígitos.
+- `suscripcion` (006): una fila por deportista o club (índices únicos parciales); renovar
+  la extiende. No guarda estado: `ACTIVE`/`EXPIRED` se calcula con `fecha_fin`.
+- `clubs_api.notification_outbox` (migración 004): eventos para el worker de
+  notificaciones de Ms_gateway, con el mismo contrato que `matching_api` y
+  `activities_api` (`id`, `user_id`, `kind`, `title`, `body`, `data`,
+  `created_at`, `published_at`). Esquema propio para que el gateway lo
+  identifique como origen `clubs_api`.
 - `interesado_club`: existe en la base, pero el servicio no la usa.
 
 ## Permisos del rol `sportmatch_clubs`
@@ -20,6 +53,12 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 | `club` | SELECT, INSERT, UPDATE | 00 (SELECT) y 001 |
 | `club_deporte` | SELECT, INSERT, DELETE | 00 (SELECT) y 001 |
 | `deporte` | SELECT | 00 |
+| `convocatoria` | SELECT, INSERT, UPDATE | 002 (UPDATE también permite el `FOR UPDATE` al postular) |
+| `postulacion_convocatoria` | SELECT, INSERT, UPDATE | 003 |
+| `comunicado_club`, `comunicado_destinatario` | SELECT, INSERT (no se editan ni borran) | 005 |
+| `plan_suscripcion` | SELECT | 006 |
+| `transaccion_pago`, `suscripcion` | SELECT, INSERT, UPDATE (nunca se borran) | 006 |
+| `clubs_api.notification_outbox` | USAGE del esquema; SELECT, INSERT, UPDATE, DELETE | 004 (el servicio inserta; el worker del gateway, con este mismo rol, lee, marca y purga) |
 
 No tiene DELETE sobre `club` ni acceso a `interesado_club`.
 
@@ -34,6 +73,19 @@ En pgAdmin, conectado a `sportmatch_clubs` como `postgres`, una vez y en orden:
    `club` y aún faltan columnas, se detiene con un error claro sin cambiar nada.
    Si el rol `sportmatch_clubs` todavía no existe, avisa y hay que volver a
    ejecutarla después del paso 1.
+3. `db/migrations/002_convocatorias.sql`: crea `convocatoria` y da permisos al
+   rol. Mismas garantías que la 001.
+4. `db/migrations/003_postulaciones.sql`: crea `postulacion_convocatoria` y da
+   permisos al rol. Mismas garantías. Sin ella fallan también las rutas de
+   convocatorias, porque informan `cupos_disponibles`.
+5. `db/migrations/004_revision_postulaciones.sql`: estados de la HU-34,
+   `comentario_club` y el outbox de notificaciones. Mismas garantías; requiere
+   la 003. Sin ella fallan las rutas de postulaciones (leen `comentario_club`).
+6. `db/migrations/005_comunicados.sql`: crea las dos tablas de comunicados y da
+   permisos al rol. Mismas garantías; requiere la 004 (usa su outbox).
+7. `db/migrations/006_pagos.sql`: planes, transacciones de pago y suscripciones. Mismas
+   garantías. Después, solo en desarrollo, `db/seeds/demo_planes.sql` (como `postgres`)
+   para tener dos planes de prueba.
 
 `python -m app.database.migrate` aplica las migraciones con el usuario de `DB_*`;
 con el rol del servicio solo sirve para comprobar que ya están aplicadas.
