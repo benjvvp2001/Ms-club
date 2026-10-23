@@ -4,8 +4,9 @@ Directorio y perfiles públicos de clubes deportivos (HU-30), administración de
 perfil por el representante del club (HU-31), convocatorias a pruebas de
 jugadores (HU-32), postulación de deportistas a esas convocatorias (HU-33) y
 revisión de candidatos por el club, con aviso al deportista (HU-34) y comunicados
-de los clubes a sus postulantes y miembros (HU-38) y pago de planes con Webpay Plus
-(HU-40). Misma arquitectura que `Ms_Users`:
+de los clubes a sus postulantes y miembros (HU-38), pago de planes con Webpay Plus
+(HU-40), club con RUT y varios administradores, y consultas entre deportistas y
+clubes (HU-51). Misma arquitectura que `Ms_Users`:
 FastAPI + Pydantic v2, PostgreSQL con psycopg 3 (pool, sin ORM), capas
 `api → services → repositories`, JWT emitido por `Ms_Users`.
 
@@ -15,8 +16,9 @@ Trabaja sobre las tablas existentes de la base `sportmatch_clubs` (`club`,
 `002_convocatorias.sql` crea la tabla `convocatoria` (un club, muchas convocatorias)
 `003_postulaciones.sql` la tabla `postulacion_convocatoria` y
 `004_revision_postulaciones.sql` los estados de revisión y el outbox de notificaciones y
-`005_comunicados.sql` las tablas de comunicados y `006_pagos.sql` planes, pagos y
-suscripciones.
+`005_comunicados.sql` las tablas de comunicados, `006_pagos.sql` planes, pagos y
+suscripciones, `007_club_rut_administradores.sql` el RUT del club, sus administradores
+e invitaciones y `008_consultas_club.sql` las consultas deportista ↔ club.
 
 ```
 app/
@@ -26,22 +28,27 @@ app/
   api/v1/postulaciones.py rutas de postulaciones y candidatos (/announcements/{id}/applications,
                           /announcements/applications/me, /announcements/applications/{id})
   api/v1/pagos.py         pagos con Webpay Plus (/api/v1/payments)
+  api/v1/administradores.py administradores e invitaciones (/{id}/admins, /admins/invitations/accept)
+  api/v1/consultas.py     consultas deportista ↔ club (/consultas/me, /{id}/consultas)
   api/dependencies.py     inyección de repositorio y servicio; usuario autenticado (Bearer)
-  core/config.py          DB_*, JWT_*, USERS_* y WEBPAY_*
+  core/config.py          DB_*, JWT_*, USERS_*, CLUB_MAX_ADMINS y WEBPAY_*
   core/security.py        validación del JWT de Ms_Users y roles (club_admin, admin)
   database/               comprobación de conexión al arranque, pool y migrador
   repositories/           contrato ClubRepository + PostgreSQL + mock en memoria
   schemas/                common.py (compartido), club.py (ClubCreate, ClubUpdate...),
                           convocatoria.py (ConvocatoriaCreate, filtros, respuestas),
                           postulacion.py (PostulacionCreate, PostulacionEstadoUpdate, candidatos),
-                          pago.py (PagoIniciar, PagoConfirmar, comprobante, suscripción)
+                          pago.py (PagoIniciar, PagoConfirmar, comprobante, suscripción),
+                          administrador.py (invitaciones) y consulta.py (mensajes e hilos)
   services/               ClubService, ConvocatoriaService, PostulacionService,
-                          PagoService, authorization.py (dueño del club), users_client.py (Ms_Users)
-                          y webpay.py (adaptador de Transbank y modo simulado)
+                          PagoService, AdministradorService, ConsultaService,
+                          authorization.py (administradores del club), rut.py (RUT y DV),
+                          users_client.py (Ms_Users) y webpay.py (Transbank y modo simulado)
 db/
   00_create_database.sql  rol sportmatch_clubs (una vez, en pgAdmin)
   migrations/             001: perfil; 002: convocatoria; 003: postulaciones; 004: revisión y outbox;
-                          005: comunicados; 006: planes, pagos y suscripciones
+                          005: comunicados; 006: planes, pagos y suscripciones;
+                          007: RUT, administradores e invitaciones; 008: consultas
   seeds/demo_planes.sql   planes de PRUEBA para desarrollo (no son el catálogo real)
                           (todas como postgres)
 tests/                    pruebas de la API con el repositorio mock
@@ -54,21 +61,33 @@ tests/                    pruebas de la API con el repositorio mock
 | GET | `/api/v1/clubs` | Público | Directorio paginado de clubes activos. |
 | GET | `/api/v1/clubs/deportes` | Público | Catálogo de deportes activos (para filtros y para asociar). |
 | GET | `/api/v1/clubs/{id}` | Público | Perfil público del club. |
-| POST | `/api/v1/clubs` | `club_admin` | Crea el club del representante (uno por cuenta). |
-| GET | `/api/v1/clubs/me` | `club_admin` | Panel de edición: el club del representante, activo o no. |
-| PATCH | `/api/v1/clubs/{id}` | `club_admin` dueño | Edita el perfil y los deportes ofrecidos. |
-| PUT | `/api/v1/clubs/{id}/deportes/{deporte_id}` | `club_admin` dueño | Asocia un deporte (idempotente). |
-| DELETE | `/api/v1/clubs/{id}/deportes/{deporte_id}` | `club_admin` dueño | Quita un deporte (idempotente). |
+| POST | `/api/v1/clubs` | `club_admin` sin club | Crea el club con su RUT; quien lo crea queda como `PRINCIPAL`. |
+| GET | `/api/v1/clubs/me` | `club_admin` | Panel de edición: el club que administro, activo o no, con `mi_rol`. |
+| PATCH | `/api/v1/clubs/{id}` | admin del club | Edita el perfil y los deportes ofrecidos. |
+| PUT | `/api/v1/clubs/{id}/deportes/{deporte_id}` | admin del club | Asocia un deporte (idempotente). |
+| DELETE | `/api/v1/clubs/{id}/deportes/{deporte_id}` | admin del club | Quita un deporte (idempotente). |
+| GET | `/api/v1/clubs/{id}/admins` | admin del club | Administradores del club. |
+| DELETE | `/api/v1/clubs/{id}/admins/{usuario_id}` | principal o el mismo admin | Quita a un administrador o sale del club. |
+| POST | `/api/v1/clubs/{id}/admins/invitations` | admin del club | Crea un código de invitación (se muestra una sola vez). |
+| GET | `/api/v1/clubs/{id}/admins/invitations` | admin del club | Invitaciones vigentes, sin código. |
+| DELETE | `/api/v1/clubs/{id}/admins/invitations/{invitacion_id}` | admin del club | Revoca una invitación vigente. |
+| POST | `/api/v1/clubs/admins/invitations/accept` | `club_admin` sin club | Entra al club como `ADMIN` con un código. |
+| GET | `/api/v1/clubs/consultas/me` | Deportista | Mis conversaciones con clubes. |
+| GET, POST | `/api/v1/clubs/{id}/consultas/me/messages` | Deportista | Leer y escribir mi consulta a un club. |
+| POST | `/api/v1/clubs/{id}/consultas/me/read` | Deportista | Marcar como leído. |
+| GET | `/api/v1/clubs/{id}/consultas` | admin del club | Bandeja compartida de consultas del club. |
+| GET, POST | `/api/v1/clubs/{id}/consultas/{hilo_id}/messages` | admin del club | Leer y responder una consulta. |
+| POST | `/api/v1/clubs/{id}/consultas/{hilo_id}/read` | admin del club | Marcar como leído. |
 | GET | `/api/v1/clubs/announcements` | Público | Sección de convocatorias (por defecto, abiertas). |
 | GET | `/api/v1/clubs/announcements/{id}` | Público | Detalle de una convocatoria. |
-| POST | `/api/v1/clubs/{id}/announcements` | `club_admin` dueño | Publica una convocatoria del club. |
-| POST | `/api/v1/clubs/{id}/announcements/{convocatoria_id}/close` | `club_admin` dueño | Cierra una convocatoria antes de su fecha. |
+| POST | `/api/v1/clubs/{id}/announcements` | admin del club | Publica una convocatoria del club. |
+| POST | `/api/v1/clubs/{id}/announcements/{convocatoria_id}/close` | admin del club | Cierra una convocatoria antes de su fecha. |
 | POST | `/api/v1/clubs/announcements/{convocatoria_id}/applications` | Deportista | Postula a una convocatoria abierta. |
 | GET | `/api/v1/clubs/announcements/applications/me` | Deportista | Historial y estado de mis postulaciones. |
-| GET | `/api/v1/clubs/announcements/{convocatoria_id}/applications` | `club_admin` dueño | Candidatos de la convocatoria. |
-| PATCH | `/api/v1/clubs/announcements/applications/{postulacion_id}` | `club_admin` dueño | Cambia el estado de un candidato y avisa al deportista. |
-| POST | `/api/v1/clubs/{id}/notices` | `club_admin` dueño | Publica un comunicado y notifica a su audiencia. |
-| GET | `/api/v1/clubs/{id}/notices` | `club_admin` dueño | Comunicados que publicó el club, con a cuántos llegó cada uno. |
+| GET | `/api/v1/clubs/announcements/{convocatoria_id}/applications` | admin del club | Candidatos de la convocatoria. |
+| PATCH | `/api/v1/clubs/announcements/applications/{postulacion_id}` | admin del club | Cambia el estado de un candidato y avisa al deportista. |
+| POST | `/api/v1/clubs/{id}/notices` | admin del club | Publica un comunicado y notifica a su audiencia. |
+| GET | `/api/v1/clubs/{id}/notices` | admin del club | Comunicados que publicó el club, con a cuántos llegó cada uno. |
 | GET | `/api/v1/clubs/notices/me` | Deportista | Mi bandeja de comunicados. |
 | GET | `/api/v1/payments/plans` | Público | Planes disponibles. |
 | POST | `/api/v1/payments/webpay/initiate` | Autenticado | Inicia el pago de un plan. |
@@ -102,10 +121,18 @@ rol del claim `roles`:
 
 - Todas las rutas de administración usan la dependencia `get_club_admin`
   (`app/api/dependencies.py`): sin token → 401; token sin rol `club_admin` → 403.
-- Además, `ClubService` comprueba que el club pertenezca a la cuenta del token
-  (`club.usuario_id`); si no, 403 `No administras este club.`. El panel es
-  exclusivo del representante dueño: ningún otro rol, ni `admin`, edita clubes.
-- Un representante administra un único club (409 si intenta crear otro).
+- Además, el servicio comprueba que la cuenta del token sea administradora del
+  club (`club_administrador`, rol `PRINCIPAL` o `ADMIN`); si no, 403 `No administras
+  este club.`. Ningún otro rol, ni `admin`, edita clubes. `club.usuario_id` queda
+  solo como dato histórico de quién lo creó.
+- Una cuenta administra un único club (409 si intenta crear otro o aceptar una invitación).
+
+`ClubCreate` (POST) exige además `rut`, el RUT del club como persona jurídica. Acepta
+puntos y `k` minúscula (`76.123.456-k`) y se guarda normalizado (`76123456-K`). Se
+valida el formato `^\d{7,8}-[\dK]$`, el dígito verificador (módulo 11) y que el
+cuerpo sea ≥ 50.000.000; si no, `422` (único caso de validación con 422, como pide el
+contrato). `409` si otro club ya tiene ese RUT. El RUT no se edita, aparece en
+`ClubManaged` y en el perfil público, y no se valida contra el SII.
 
 `ClubCreate` (POST) y `ClubUpdate` (PATCH) aceptan: `nombre`, `descripcion`
 (500), `historia` (3000), `direccion`, `comuna`, `provincia`, `latitud` y
@@ -122,9 +149,10 @@ todos los deportes). Perfil y deportes se guardan en una sola transacción; un
 deporte inexistente o inactivo responde 400 sin guardar nada. Logo y portada se guardan
 como URL: la subida de archivos no es parte de este servicio.
 
-Respuesta de POST, PATCH y `/me`: el perfil más `is_active`,
+Respuesta de POST, PATCH y `/me`: el perfil (con `rut`) más `is_active`,
 `estado_verificacion` (`pendiente`, `verificado`, `rechazado`; lo fija el equipo
-de SportMatch), `fecha_creacion` y `fecha_actualizacion`.
+de SportMatch), `fecha_creacion` y `fecha_actualizacion`. `/me` agrega `mi_rol`
+(`PRINCIPAL` o `ADMIN`).
 
 ### Errores
 
@@ -134,11 +162,12 @@ de SportMatch), `fecha_creacion` y `fecha_actualizacion`.
 - `401` sin token o con token inválido/expirado.
 - `403` el rol o la cuenta no administra ese club.
 - `404` club inexistente (o inactivo, en las rutas públicas) o deporte inexistente/inactivo.
-- `409` el representante ya administra un club.
+- `409` la cuenta ya administra un club, o el RUT ya existe.
+- `422` RUT inválido al crear un club.
 
 ## Convocatorias (HU-32)
 
-El representante dueño del club publica pruebas masivas o de jugadores con
+Cualquier administrador del club publica pruebas masivas o de jugadores con
 `POST /api/v1/clubs/{club_id}/announcements` (mismo control de acceso que la
 HU-31). `ConvocatoriaCreate`:
 
@@ -217,7 +246,7 @@ Estados de una postulación: `PENDIENTE` (inicial), `PRESELECCIONADO`, `ACEPTADO
 `RECHAZADO`, sin tildes como los demás valores de la API. `PRESELECCIONADO`
 reemplazó al `EN_REVISION` de la HU-33 (la migración 004 convierte las filas).
 
-Solo el `club_admin` dueño del club de la convocatoria (mismo control que la
+Solo un administrador (`club_admin`) del club de la convocatoria (mismo control que la
 HU-31: `401` sin token, `403` otro rol u otro club, incluido `admin`). Funciona
 aunque el club esté inactivo o la prueba ya haya pasado: la selección se
 confirma después de la prueba.
@@ -251,7 +280,7 @@ Para que llegue, el gateway debe leer este outbox (ver `PENDIENTES.md`).
 Un club avisa a los deportistas vinculados a él. Las rutas viven bajo `/notices`
 porque `/announcements` ya es de las convocatorias (HU-32).
 
-`POST /api/v1/clubs/{club_id}/notices` (solo el `club_admin` dueño, mismo control
+`POST /api/v1/clubs/{club_id}/notices` (solo un administrador del club, mismo control
 que la HU-31; `404` si el club no existe, `409` si está inactivo) recibe
 `ComunicadoCreate` (el `CreateAnnouncementDto`):
 
@@ -291,6 +320,60 @@ dirigidos al deportista, el más reciente primero. Filtros opcionales `club_id`,
 `prioridad`, `page` y `page_size`. `GET /api/v1/clubs/{club_id}/notices` lista lo que
 publicó el club (filtros `audiencia` y `prioridad`). Los comunicados no se editan ni
 se borran.
+
+## Administradores del club
+
+Un club tiene varios administradores (cuentas `club_admin` de Ms_Users) en
+`club_administrador`: el `PRINCIPAL`, que lo creó, y los `ADMIN`, que entraron con una
+invitación. Cualquiera de ellos gestiona todo el club (perfil, deportes, convocatorias,
+candidatos, comunicados, consultas, invitaciones y pagos del club). El deportista que
+entra a un club no es administrador.
+
+- **Invitar.** `POST /{club_id}/admins/invitations` genera un código de 10 caracteres
+  (`secrets`, mayúsculas y dígitos sin los ambiguos `0 O 1 I L`) que vence en 72 h y
+  sirve una sola vez. Se muestra solo en esa respuesta: la base guarda su SHA-256.
+  `409` si los administradores más las invitaciones vigentes ya llegan a
+  `CLUB_MAX_ADMINS` (por defecto 10; entre 3 y 100). `GET` lista las vigentes sin el
+  código y `DELETE .../invitations/{id}` revoca una (404 si no está vigente o es de otro club).
+- **Aceptar.** `POST /api/v1/clubs/admins/invitations/accept` con `{"codigo": "..."}`
+  (se ignoran espacios, guiones y mayúsculas). La cuenta debe tener rol `club_admin` y
+  no administrar otro club (`409`). Un código inexistente, vencido, usado o revocado
+  responde siempre el mismo `404`. La invitación se marca usada y la cuenta se agrega
+  como `ADMIN` en una sola transacción: con el mismo código, solo una cuenta entra.
+- **Quitar y salir.** `DELETE /{club_id}/admins/{usuario_id}`: el `PRINCIPAL` quita a un
+  `ADMIN`; un `ADMIN` sale con su propio `usuario_id` y no puede quitar a otros (`403`).
+  El `PRINCIPAL` no puede ser quitado ni salir (`409`; el traspaso queda pendiente).
+  Alguien que no es administrador de ese club responde `404`.
+- **Nombre.** Al crear el club o aceptar una invitación se pide a Ms_Users el perfil de
+  la propia cuenta con su token (`GET /api/v1/users/{id}/profile`) y se guarda
+  "nombre apellido". Si Ms_Users falla se guarda `Administrador del club`: nunca bloquea.
+
+## Consultas deportista ↔ club (HU-51)
+
+Una conversación (`consulta_hilo`) por club y deportista. Del lado del club es una
+bandeja compartida: cualquier administrador lee y responde, y el deportista ve las
+respuestas firmadas por el club, nunca por la persona (no se expone `autor_id`).
+
+- Deportista (roles `player`/`usuario`): `GET /consultas/me` (sus conversaciones con
+  clubes activos, la del último mensaje primero), `GET` y `POST
+  /{club_id}/consultas/me/messages` y `POST /{club_id}/consultas/me/read`. El primer
+  mensaje crea la conversación y guarda el nombre del deportista (de Ms_Users con su
+  token; `Deportista` si falla). Club inexistente o inactivo: `404`.
+- Club (administradores): `GET /{club_id}/consultas`, `GET` y `POST
+  /{club_id}/consultas/{hilo_id}/messages` y `POST /{club_id}/consultas/{hilo_id}/read`.
+  Una conversación de otro club responde `404`. Un club inactivo lee pero no responde (`409`).
+- `Mensaje = {id, de: "deportista" | "club", texto, enviado_en, propio}`. `texto` de 1 a
+  1000 caracteres, sin solo espacios; `client_message_id` es un UUID de la app: repetirlo
+  devuelve el mismo mensaje (`201`) sin duplicarlo ni volver a avisar.
+- Paginación: orden ascendente por `id`; `after_id` trae los siguientes, `before_id` los
+  anteriores y sin ninguno, los últimos; `limit` de 1 a 100 (50 por defecto).
+- Leídos: `{"hasta_id": n}` avanza la marca de ese lado (nunca retrocede ni pasa del
+  último mensaje). `no_leidos` cuenta los mensajes del otro lado posteriores a la marca;
+  del lado del club la marca es compartida.
+- Avisos en `clubs_api.notification_outbox`, en la misma transacción del mensaje y
+  **sin su texto**, con `kind: "consulta"`: al deportista cuando responde el club
+  (`data: {screen: "consulta", clubId, hiloId}`) y a cada administrador cuando escribe
+  el deportista (`data: {screen: "consulta_club", clubId, hiloId}`).
 
 ## Pagos con Webpay Plus (HU-40)
 
@@ -352,8 +435,9 @@ Variables en `.env` (ver `.env.example`): `DB_HOST`, `DB_PORT`, `DB_USER`,
 `DB_PASSWORD`, `DB_NAME` (por defecto `sportmatch_clubs`), `JWT_SECRET`,
 `JWT_ISSUER`, `JWT_AUDIENCE`, que deben ser los mismos de Ms_Users, y
 `USERS_SERVICE_URL` (por defecto `http://127.0.0.1:8001`) y `USERS_TIMEOUT_SECONDS`
-para pedir el perfil deportivo a Ms_Users. Para postular, Ms_Users debe estar
-corriendo; el resto del servicio no lo necesita. Los pagos usan `WEBPAY_MOCK_MODE`,
+para pedir el perfil deportivo y los nombres a Ms_Users. Para postular, Ms_Users debe
+estar corriendo; el resto del servicio no lo necesita (sin él, los nombres quedan
+neutros). `CLUB_MAX_ADMINS` (3 a 100, por defecto 10) limita los administradores por club. Los pagos usan `WEBPAY_MOCK_MODE`,
 `WEBPAY_ENVIRONMENT`, `WEBPAY_COMMERCE_CODE`, `WEBPAY_API_KEY`, `WEBPAY_PUBLIC_URL`,
 `WEBPAY_FRONTEND_RETURN_URL` y `WEBPAY_TIMEOUT_SECONDS` (ver `.env.example`); las
 primeras dos URL son obligatorias y la API key nunca se registra en logs. Igual que
@@ -373,7 +457,9 @@ Una vez, en pgAdmin conectado a `sportmatch_clubs` como `postgres`, en este orde
 5. `db/migrations/004_revision_postulaciones.sql`.
 6. `db/migrations/005_comunicados.sql`.
 7. `db/migrations/006_pagos.sql`.
-8. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
+8. `db/migrations/007_club_rut_administradores.sql`.
+9. `db/migrations/008_consultas_club.sql`.
+10. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
 
 ```bash
 pip install -e ".[dev]"
