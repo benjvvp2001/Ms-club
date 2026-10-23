@@ -64,17 +64,17 @@ class StoredAdmin:
 
 
 @dataclass(frozen=True)
-class StoredInvitacion:
-    """A row of club_invitacion_admin (007). Only the code's hash is stored."""
+class StoredAsignacion:
+    """A row of club_admin_asignacion (009): an email the PRINCIPAL assigned to
+    the club. Pending until an account with that email activates it."""
 
     id: UUID
     club_id: UUID
-    codigo_hash: str
-    creada_por: UUID
+    email: str
+    asignada_por: UUID
     fecha_creacion: datetime
-    expira_en: datetime
-    usada_por: UUID | None = None
-    usada_en: datetime | None = None
+    aceptada_por: UUID | None = None
+    aceptada_en: datetime | None = None
     revocada_en: datetime | None = None
 
 
@@ -246,9 +246,14 @@ class StoredHilo:
 
 # Outcome of creating a club; the checks run atomically with the inserts.
 CreateClubResult = Literal["creado", "ya_administra", "rut_duplicado"]
-# Outcome of accepting an invitation. no_encontrada covers an unknown, expired,
-# used or revoked code alike.
-AcceptResult = Literal["aceptada", "no_encontrada", "ya_administra", "sin_cupo"]
+# Outcome of assigning an email. duplicada: already pending in that club;
+# ya_administra: an account that activated that email still administers the club.
+AsignarResult = Literal["creada", "duplicada", "ya_administra", "sin_cupo"]
+# Outcome of activating an assignment on GET /clubs/me.
+ClaimResult = Literal["aceptada", "sin_asignacion", "ya_administra"]
+# Who may read a club's thread: sin_club (no such club), no_admin (the account
+# does not administer it), sin_hilo (not a thread of that club) or ok.
+AccesoHilo = Literal["ok", "sin_club", "no_admin", "sin_hilo"]
 # Outcome of an application; every check runs atomically with the insert.
 ApplyResult = Literal["creada", "no_encontrada", "no_abierta", "duplicada", "sin_cupos"]
 # Outcome of a review. sin_cambios: same estado (the comment may still change).
@@ -285,7 +290,7 @@ class ClubRepository(Protocol):
         that RUT. The checks and the inserts are atomic."""
         ...
 
-    # -- administradores e invitaciones ---------------------------------------------
+    # -- administradores y asignaciones por correo ----------------------------------
 
     def get_admin(self, club_id: UUID, usuario_id: UUID) -> StoredAdmin | None:
         """The account's row in club_administrador for that club."""
@@ -299,27 +304,36 @@ class ClubRepository(Protocol):
         """Delete an ADMIN of the club (never the PRINCIPAL); False when there was none."""
         ...
 
-    def create_invitacion(
-        self, club_id: UUID, creada_por: UUID, codigo_hash: str, horas: int, max_admins: int
-    ) -> StoredInvitacion | None:
-        """Insert an invitation valid for horas; None when the club's
-        administrators plus its pending invitations already reach max_admins.
-        The count and the insert are atomic."""
+    def create_asignacion(
+        self, club_id: UUID, email: str, asignada_por: UUID, max_admins: int
+    ) -> tuple[AsignarResult, StoredAsignacion | None]:
+        """Assign email to the club as a pending administrator. duplicada when
+        it is already pending there; sin_cupo when the administrators plus the
+        pending assignments already reach max_admins. The checks and the insert
+        are atomic (the club's admins are locked while counting)."""
         ...
 
-    def list_invitaciones(self, club_id: UUID) -> list[StoredInvitacion]:
-        """Pending invitations (not used, revoked nor expired), newest first."""
+    def list_asignaciones(self, club_id: UUID) -> list[StoredAsignacion]:
+        """Pending assignments of the club (not accepted nor revoked), newest first."""
         ...
 
-    def revoke_invitacion(self, club_id: UUID, invitacion_id: UUID) -> bool:
-        """Revoke a pending invitation of that club; False when there is none."""
+    def revoke_asignacion(self, club_id: UUID, asignacion_id: UUID) -> bool:
+        """Revoke a pending assignment of that club; False when there is none."""
         ...
 
-    def accept_invitacion(
-        self, codigo_hash: str, usuario_id: UUID, nombre: str, max_admins: int
-    ) -> tuple[AcceptResult, StoredClub | None]:
-        """Use a pending invitation and add the account as ADMIN of its club,
-        atomically and only once."""
+    def has_asignacion_pendiente(self, email: str) -> bool:
+        """Whether email has a pending assignment in an active club (a cheap
+        check before asking Ms_Users for the name)."""
+        ...
+
+    def claim_asignacion(
+        self, email: str, usuario_id: UUID, nombre: str, max_admins: int
+    ) -> ClaimResult:
+        """Activate the oldest pending assignment of email in an active club
+        with room: add the account as ADMIN (agregado_por = asignada_por) and
+        mark it accepted, atomically and only once (FOR UPDATE).
+        ya_administra when the account already administers a club; then every
+        assignment stays pending."""
         ...
 
     # -- consultas deportista <-> club (HU-51) ----------------------------------------
@@ -366,6 +380,46 @@ class ClubRepository(Protocol):
     def mark_read(self, hilo_id: UUID, de: str, hasta_id: int) -> None:
         """Move that side's read mark forward to hasta_id (never back, never
         past the thread's last message). de is the side that read."""
+        ...
+
+    # Polling paths (sección F): one connection and the fewest queries each.
+
+    def mensajes_deportista(
+        self,
+        club_id: UUID,
+        deportista_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[bool, UUID | None, list[StoredMensaje]]:
+        """The athlete's page of messages with an active club: (club found,
+        thread id or None, messages as list_mensajes returns them)."""
+        ...
+
+    def mensajes_club(
+        self,
+        club_id: UUID,
+        usuario_id: UUID,
+        hilo_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[AccesoHilo, list[StoredMensaje]]:
+        """A page of a club's thread read by usuario_id; messages only when ok.
+        The club may be inactive (its administrators still read)."""
+        ...
+
+    def mark_read_deportista(self, club_id: UUID, deportista_id: UUID, hasta_id: int) -> bool:
+        """mark_read of the athlete's thread with an active club, if there is
+        one. False when the club does not exist or is inactive."""
+        ...
+
+    def mark_read_club(
+        self, club_id: UUID, usuario_id: UUID, hilo_id: UUID, hasta_id: int
+    ) -> AccesoHilo:
+        """mark_read on the club's side; only applied when ok."""
         ...
 
     def update_club(

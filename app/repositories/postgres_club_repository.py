@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 from typing import Any
 from uuid import UUID
 
@@ -10,19 +9,21 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from app.repositories.base import (
-    AcceptResult,
+    AccesoHilo,
     ApplyResult,
+    AsignarResult,
+    ClaimResult,
     ClubSport,
     CreateClubResult,
     OutboxEvent,
     OutboxMessage,
     ReviewResult,
     StoredAdmin,
+    StoredAsignacion,
     StoredClub,
     StoredComunicado,
     StoredConvocatoria,
     StoredHilo,
-    StoredInvitacion,
     StoredMensaje,
     StoredPlan,
     StoredPostulacion,
@@ -186,13 +187,13 @@ _CONVOCATORIA_CONDITIONS = f"""
 
 _ADMIN_COLUMNS = "club_id, usuario_id, rol, nombre, agregado_por, fecha_alta"
 
-_INVITACION_COLUMNS = """
-    id, club_id, codigo_hash, creada_por, fecha_creacion, expira_en, usada_por, usada_en,
-    revocada_en
+_ASIGNACION_COLUMNS = """
+    id, club_id, email, asignada_por, fecha_creacion, aceptada_por, aceptada_en, revocada_en
 """
 
-# Not used, not revoked and not expired (database clock).
-_INVITACION_VIGENTE = "usada_en IS NULL AND revocada_en IS NULL AND expira_en > now()"
+# Neither accepted nor revoked (the partial indexes of 009 use the same condition).
+_ASIGNACION_PENDIENTE = "aceptada_en IS NULL AND revocada_en IS NULL"
+_ASIGNACION_S_PENDIENTE = "s.aceptada_en IS NULL AND s.revocada_en IS NULL"
 
 _MENSAJE_COLUMNS = "id, hilo_id, autor_id, de, texto, client_message_id, enviado_en"
 
@@ -225,6 +226,16 @@ _HILO_ORDER = "ORDER BY u.id DESC NULLS LAST, h.fecha_creacion DESC, h.id"
 
 # Read mark of each side, by the side that reads.
 _LEIDO_COLUMN = {"deportista": "leido_deportista_id", "club": "leido_club_id"}
+
+# Whether usuario_id may read the club's thread hilo_id. The club may be inactive.
+_ACCESO_HILO_CLUB = """
+    SELECT
+        EXISTS (SELECT 1 FROM club WHERE id = %(club_id)s) AS acceso_club,
+        EXISTS (SELECT 1 FROM club_administrador
+                WHERE club_id = %(club_id)s AND usuario_id = %(usuario_id)s) AS acceso_admin,
+        EXISTS (SELECT 1 FROM consulta_hilo
+                WHERE id = %(hilo_id)s AND club_id = %(club_id)s) AS acceso_hilo
+"""
 
 _CONVOCATORIA_COLUMNS = frozenset({
     "deporte_id", "titulo", "descripcion", "categoria_edad", "edad_minima", "edad_maxima",
@@ -390,7 +401,7 @@ class PostgresClubRepository:
                 (club_id, deporte_id),
             )
 
-    # -- administradores e invitaciones ---------------------------------------------
+    # -- administradores y asignaciones por correo ----------------------------------
 
     def get_admin(self, club_id: UUID, usuario_id: UUID) -> StoredAdmin | None:
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -425,96 +436,136 @@ class PostgresClubRepository:
             )
             return deleted.rowcount > 0
 
-    def create_invitacion(
-        self, club_id: UUID, creada_por: UUID, codigo_hash: str, horas: int, max_admins: int
-    ) -> StoredInvitacion | None:
-        with self._pool.connection() as conn, conn.transaction():
-            # Serializes the count with other invitations and acceptances of the club.
-            _lock_club_admins(conn, club_id)
-            ocupados = conn.execute(
-                f"""
-                SELECT (SELECT count(*) FROM club_administrador WHERE club_id = %(club_id)s)
-                     + (SELECT count(*) FROM club_invitacion_admin
-                        WHERE club_id = %(club_id)s AND {_INVITACION_VIGENTE})
-                """,
-                {"club_id": club_id},
-            ).fetchone()[0]
-            if ocupados >= max_admins:
-                return None
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
+    def create_asignacion(
+        self, club_id: UUID, email: str, asignada_por: UUID, max_admins: int
+    ) -> tuple[AsignarResult, StoredAsignacion | None]:
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                # Serializes the count with other assignments and activations of the club.
+                _lock_club_admins(conn, club_id)
+                estado = conn.execute(
                     f"""
-                    INSERT INTO club_invitacion_admin (club_id, codigo_hash, creada_por, expira_en)
-                    VALUES (%s, %s, %s, now() + make_interval(hours => %s))
-                    RETURNING {_INVITACION_COLUMNS}
+                    SELECT
+                        EXISTS (SELECT 1 FROM club_admin_asignacion
+                                WHERE club_id = %(club_id)s AND email = %(email)s
+                                  AND {_ASIGNACION_PENDIENTE}),
+                        EXISTS (SELECT 1 FROM club_admin_asignacion s
+                                JOIN club_administrador a
+                                  ON a.club_id = s.club_id AND a.usuario_id = s.aceptada_por
+                                WHERE s.club_id = %(club_id)s AND s.email = %(email)s),
+                        (SELECT count(*) FROM club_administrador WHERE club_id = %(club_id)s)
+                        + (SELECT count(*) FROM club_admin_asignacion
+                           WHERE club_id = %(club_id)s AND {_ASIGNACION_PENDIENTE})
                     """,
-                    (club_id, codigo_hash, creada_por, horas),
-                )
-                return StoredInvitacion(**cur.fetchone())
+                    {"club_id": club_id, "email": email},
+                ).fetchone()
+                pendiente, ya_admin, ocupados = estado
+                if pendiente:
+                    return "duplicada", None
+                if ya_admin:
+                    return "ya_administra", None
+                if ocupados >= max_admins:
+                    return "sin_cupo", None
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO club_admin_asignacion (club_id, email, asignada_por)
+                        VALUES (%s, %s, %s)
+                        RETURNING {_ASIGNACION_COLUMNS}
+                        """,
+                        (club_id, email, asignada_por),
+                    )
+                    return "creada", StoredAsignacion(**cur.fetchone())
+        except errors.UniqueViolation as error:
+            # Backstop of the check above (club_admin_asignacion_pendiente_uq).
+            if error.diag.constraint_name == "club_admin_asignacion_pendiente_uq":
+                return "duplicada", None
+            raise
 
-    def list_invitaciones(self, club_id: UUID) -> list[StoredInvitacion]:
+    def list_asignaciones(self, club_id: UUID) -> list[StoredAsignacion]:
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 f"""
-                SELECT {_INVITACION_COLUMNS} FROM club_invitacion_admin
-                WHERE club_id = %s AND {_INVITACION_VIGENTE}
+                SELECT {_ASIGNACION_COLUMNS} FROM club_admin_asignacion
+                WHERE club_id = %s AND {_ASIGNACION_PENDIENTE}
                 ORDER BY fecha_creacion DESC, id DESC
                 """,
                 (club_id,),
             )
-            return [StoredInvitacion(**row) for row in cur.fetchall()]
+            return [StoredAsignacion(**row) for row in cur.fetchall()]
 
-    def revoke_invitacion(self, club_id: UUID, invitacion_id: UUID) -> bool:
+    def revoke_asignacion(self, club_id: UUID, asignacion_id: UUID) -> bool:
         with self._pool.connection() as conn:
             updated = conn.execute(
                 f"""
-                UPDATE club_invitacion_admin SET revocada_en = now()
-                WHERE id = %s AND club_id = %s AND {_INVITACION_VIGENTE}
+                UPDATE club_admin_asignacion SET revocada_en = now()
+                WHERE id = %s AND club_id = %s AND {_ASIGNACION_PENDIENTE}
                 """,
-                (invitacion_id, club_id),
+                (asignacion_id, club_id),
             )
             return updated.rowcount > 0
 
-    def accept_invitacion(
-        self, codigo_hash: str, usuario_id: UUID, nombre: str, max_admins: int
-    ) -> tuple[AcceptResult, StoredClub | None]:
+    def has_asignacion_pendiente(self, email: str) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"""
+                SELECT EXISTS (
+                    SELECT 1 FROM club_admin_asignacion s JOIN club c ON c.id = s.club_id
+                    WHERE s.email = %s AND {_ASIGNACION_S_PENDIENTE}
+                      AND c.is_active
+                )
+                """,
+                (email,),
+            ).fetchone()
+        return bool(row[0])
+
+    def claim_asignacion(
+        self, email: str, usuario_id: UUID, nombre: str, max_admins: int
+    ) -> ClaimResult:
         with self._pool.connection() as conn, conn.transaction():
             # Same lock as creating a club: an account cannot join two clubs at once.
             _lock_account(conn, usuario_id)
             if conn.execute(
                 "SELECT 1 FROM club_administrador WHERE usuario_id = %s", (usuario_id,)
             ).fetchone():
-                return "ya_administra", None
-            # FOR UPDATE: two accounts using the same code at once, only one gets it.
-            row = conn.execute(
+                return "ya_administra"
+            # FOR UPDATE: a revocation (or another activation) waits for this one.
+            candidatas = conn.execute(
                 f"""
-                SELECT id, club_id, codigo_hash, creada_por FROM club_invitacion_admin
-                WHERE codigo_hash = %s AND {_INVITACION_VIGENTE}
-                FOR UPDATE
+                SELECT s.id, s.club_id, s.asignada_por
+                FROM club_admin_asignacion s
+                JOIN club c ON c.id = s.club_id
+                WHERE s.email = %s AND {_ASIGNACION_S_PENDIENTE}
+                  AND c.is_active
+                ORDER BY s.fecha_creacion, s.id
+                FOR UPDATE OF s
                 """,
-                (codigo_hash,),
-            ).fetchone()
-            if row is None or not hmac.compare_digest(row[2], codigo_hash):
-                return "no_encontrada", None
-            invitacion_id, club_id, _, creada_por = row
-            _lock_club_admins(conn, club_id)
-            admins = conn.execute(
-                "SELECT count(*) FROM club_administrador WHERE club_id = %s", (club_id,)
-            ).fetchone()[0]
-            if admins >= max_admins:
-                return "sin_cupo", None
-            conn.execute(
-                "UPDATE club_invitacion_admin SET usada_por = %s, usada_en = now() WHERE id = %s",
-                (usuario_id, invitacion_id),
-            )
-            conn.execute(
-                """
-                INSERT INTO club_administrador (club_id, usuario_id, rol, nombre, agregado_por)
-                VALUES (%s, %s, 'ADMIN', %s, %s)
-                """,
-                (club_id, usuario_id, nombre, creada_por),
-            )
-        return "aceptada", self.get_club(club_id, include_inactive=True)
+                (email,),
+            ).fetchall()
+            for asignacion_id, club_id, asignada_por in candidatas:
+                _lock_club_admins(conn, club_id)
+                admins = conn.execute(
+                    "SELECT count(*) FROM club_administrador WHERE club_id = %s", (club_id,)
+                ).fetchone()[0]
+                if admins >= max_admins:
+                    # Only when CLUB_MAX_ADMINS was lowered: try the next club.
+                    continue
+                conn.execute(
+                    """
+                    UPDATE club_admin_asignacion SET aceptada_por = %s, aceptada_en = now()
+                    WHERE id = %s
+                    """,
+                    (usuario_id, asignacion_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO club_administrador (club_id, usuario_id, rol, nombre, agregado_por)
+                    VALUES (%s, %s, 'ADMIN', %s, %s)
+                    """,
+                    (club_id, usuario_id, nombre, asignada_por),
+                )
+                return "aceptada"
+        return "sin_asignacion"
 
     # -- consultas deportista <-> club (HU-51) ----------------------------------------
 
@@ -556,24 +607,7 @@ class PostgresClubRepository:
         self, hilo_id: UUID, *, after_id: int | None, before_id: int | None, limit: int
     ) -> list[StoredMensaje]:
         params = {"hilo_id": hilo_id, "after_id": after_id, "before_id": before_id, "limit": limit}
-        conditions = """
-            hilo_id = %(hilo_id)s
-            AND (%(after_id)s::bigint IS NULL OR id > %(after_id)s)
-            AND (%(before_id)s::bigint IS NULL OR id < %(before_id)s)
-        """
-        if after_id is not None:
-            query = f"""
-                SELECT {_MENSAJE_COLUMNS} FROM consulta_mensaje
-                WHERE {conditions} ORDER BY id LIMIT %(limit)s
-            """
-        else:
-            # The latest ones, returned in ascending order.
-            query = f"""
-                SELECT * FROM (
-                    SELECT {_MENSAJE_COLUMNS} FROM consulta_mensaje
-                    WHERE {conditions} ORDER BY id DESC LIMIT %(limit)s
-                ) ultimos ORDER BY id
-            """
+        query = f"SELECT * FROM ({_pagina_mensajes('%(hilo_id)s', after_id)}) m ORDER BY m.id"
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(query, params)
             return [StoredMensaje(**row) for row in cur.fetchall()]
@@ -627,19 +661,113 @@ class PostgresClubRepository:
         return StoredMensaje(**row), True
 
     def mark_read(self, hilo_id: UUID, de: str, hasta_id: int) -> None:
-        column = sql.Identifier(_LEIDO_COLUMN[de])
         with self._pool.connection() as conn:
             conn.execute(
-                sql.SQL(
-                    """
-                    UPDATE consulta_hilo h
-                    SET {column} = GREATEST(h.{column}, LEAST(%s, COALESCE(
-                        (SELECT max(m.id) FROM consulta_mensaje m WHERE m.hilo_id = h.id), 0)))
-                    WHERE h.id = %s
-                    """
-                ).format(column=column),
-                (hasta_id, hilo_id),
+                sql.SQL("UPDATE consulta_hilo h SET {set} WHERE h.id = %(hilo_id)s AND {avanza}")
+                .format(**_leido_sql(de)),
+                {"hilo_id": hilo_id, "hasta_id": hasta_id},
             )
+
+    # Polling paths (sección F): each is a single statement on one connection.
+
+    def mensajes_deportista(
+        self,
+        club_id: UUID,
+        deportista_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[bool, UUID | None, list[StoredMensaje]]:
+        # No row: no such active club. One row with m.id NULL: no thread or no messages.
+        query = f"""
+            WITH p AS (
+                SELECT (SELECT h.id FROM consulta_hilo h
+                        WHERE h.club_id = c.id AND h.deportista_id = %(deportista_id)s) AS ref_hilo
+                FROM club c
+                WHERE c.id = %(club_id)s AND c.is_active
+            )
+            SELECT p.ref_hilo, m.*
+            FROM p LEFT JOIN LATERAL ({_pagina_mensajes('p.ref_hilo', after_id)}) m ON true
+            ORDER BY m.id
+        """
+        params = {
+            "club_id": club_id, "deportista_id": deportista_id,
+            "after_id": after_id, "before_id": before_id, "limit": limit,
+        }
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+        if not rows:
+            return False, None, []
+        return True, rows[0]["ref_hilo"], _mensajes(rows)
+
+    def mensajes_club(
+        self,
+        club_id: UUID,
+        usuario_id: UUID,
+        hilo_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[AccesoHilo, list[StoredMensaje]]:
+        query = f"""
+            WITH a AS ({_ACCESO_HILO_CLUB})
+            SELECT a.*, m.*
+            FROM a LEFT JOIN LATERAL (
+                SELECT * FROM ({_pagina_mensajes('%(hilo_id)s', after_id)}) pagina
+                WHERE a.acceso_club AND a.acceso_admin AND a.acceso_hilo
+            ) m ON true
+            ORDER BY m.id
+        """
+        params = {
+            "club_id": club_id, "usuario_id": usuario_id, "hilo_id": hilo_id,
+            "after_id": after_id, "before_id": before_id, "limit": limit,
+        }
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+        acceso = _acceso(rows[0])
+        return acceso, _mensajes(rows) if acceso == "ok" else []
+
+    def mark_read_deportista(self, club_id: UUID, deportista_id: UUID, hasta_id: int) -> bool:
+        query = sql.SQL(
+            """
+            WITH c AS (SELECT id FROM club WHERE id = %(club_id)s AND is_active),
+            u AS (
+                UPDATE consulta_hilo h SET {set}
+                FROM c
+                WHERE h.club_id = c.id AND h.deportista_id = %(deportista_id)s AND {avanza}
+            )
+            SELECT EXISTS (SELECT 1 FROM c)
+            """
+        ).format(**_leido_sql("deportista"))
+        params = {"club_id": club_id, "deportista_id": deportista_id, "hasta_id": hasta_id}
+        with self._pool.connection() as conn:
+            return bool(conn.execute(query, params).fetchone()[0])
+
+    def mark_read_club(
+        self, club_id: UUID, usuario_id: UUID, hilo_id: UUID, hasta_id: int
+    ) -> AccesoHilo:
+        query = sql.SQL(
+            """
+            WITH a AS ({acceso}),
+            u AS (
+                UPDATE consulta_hilo h SET {set}
+                FROM a
+                WHERE h.id = %(hilo_id)s AND h.club_id = %(club_id)s
+                  AND a.acceso_admin AND {avanza}
+            )
+            SELECT * FROM a
+            """
+        ).format(acceso=sql.SQL(_ACCESO_HILO_CLUB), **_leido_sql("club"))
+        params = {
+            "club_id": club_id, "usuario_id": usuario_id, "hilo_id": hilo_id, "hasta_id": hasta_id,
+        }
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            return _acceso(cur.fetchone())
 
     def _load_hilos(self, query: str, params: Any) -> list[StoredHilo]:
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -1186,7 +1314,7 @@ def _replace_sports(conn: Any, club_id: UUID, deporte_ids: list[int]) -> None:
 
 
 def _lock_account(conn: Any, usuario_id: UUID) -> None:
-    """Serializes creating a club and accepting invitations by one account, so
+    """Serializes creating a club and activating assignments by one account, so
     the one-club-per-account check holds (the unique usuario_id backs it)."""
     conn.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"club-admin:{usuario_id}",)
@@ -1194,10 +1322,55 @@ def _lock_account(conn: Any, usuario_id: UUID) -> None:
 
 
 def _lock_club_admins(conn: Any, club_id: UUID) -> None:
-    """Serializes counting a club's administrators and pending invitations."""
+    """Serializes counting a club's administrators and pending assignments."""
     conn.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"club-admins:{club_id}",)
     )
+
+
+def _pagina_mensajes(hilo: str, after_id: int | None) -> str:
+    """Subquery with up to %(limit)s messages of the thread hilo (an SQL
+    expression): the first ones after %(after_id)s, otherwise the last ones
+    before %(before_id)s (or the latest ones). The caller orders by id."""
+    conditions = f"""
+        m.hilo_id = {hilo}
+        AND (%(after_id)s::bigint IS NULL OR m.id > %(after_id)s)
+        AND (%(before_id)s::bigint IS NULL OR m.id < %(before_id)s)
+    """
+    columns = ", ".join(f"m.{column.strip()}" for column in _MENSAJE_COLUMNS.split(","))
+    order = "m.id" if after_id is not None else "m.id DESC"
+    return (
+        f"SELECT {columns} FROM consulta_mensaje m WHERE {conditions} "
+        f"ORDER BY {order} LIMIT %(limit)s"
+    )
+
+
+def _leido_sql(de: str) -> dict[str, sql.Composable]:
+    """SET and WHERE of a read mark update of the thread h by side de: forward
+    to %(hasta_id)s, never back, never past the last message. The WHERE skips
+    the write when the mark would not move."""
+    column = sql.Identifier(_LEIDO_COLUMN[de])
+    return {
+        "set": sql.SQL(
+            "{column} = GREATEST(h.{column}, LEAST(%(hasta_id)s, COALESCE("
+            "(SELECT max(m.id) FROM consulta_mensaje m WHERE m.hilo_id = h.id), 0)))"
+        ).format(column=column),
+        "avanza": sql.SQL("h.{column} < %(hasta_id)s").format(column=column),
+    }
+
+
+def _mensajes(rows: list[dict[str, Any]]) -> list[StoredMensaje]:
+    """The messages of a page query's rows (m.id NULL: no message)."""
+    names = ("id", "hilo_id", "autor_id", "de", "texto", "client_message_id", "enviado_en")
+    return [StoredMensaje(**{n: row[n] for n in names}) for row in rows if row["id"] is not None]
+
+
+def _acceso(row: dict[str, Any]) -> AccesoHilo:
+    if not row["acceso_club"]:
+        return "sin_club"
+    if not row["acceso_admin"]:
+        return "no_admin"
+    return "ok" if row["acceso_hilo"] else "sin_hilo"
 
 
 def _to_hilo(row: dict[str, Any]) -> StoredHilo:

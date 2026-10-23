@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 
 from app.core.security import Actor
 from app.repositories.base import (
+    AccesoHilo,
     ClubRepository,
     OutboxMessage,
     StoredClub,
@@ -22,7 +23,7 @@ from app.schemas.consulta import (
     MensajeFilters,
     MensajesPage,
 )
-from app.services.authorization import club_not_found, require_managed_club
+from app.services.authorization import club_not_found, not_club_admin, require_managed_club
 from app.services.users_client import ATHLETE_NAME_FALLBACK, AccountNames, account_name
 
 
@@ -32,6 +33,10 @@ class ConsultaService:
     One thread per (club, athlete). On the club side it is a shared inbox: any
     administrator reads and answers, and the athlete sees the answers signed by
     the club, never by the person. The notifications never carry the text.
+
+    Reading messages and marking them read are what the app polls (sección F):
+    each is one repository call (one connection, one statement) and never
+    calls Ms_Users.
     """
 
     def __init__(self, repository: ClubRepository, names: AccountNames | None = None) -> None:
@@ -55,11 +60,14 @@ class ConsultaService:
         ]
 
     def my_messages(self, actor: Actor, club_id: UUID, filters: MensajeFilters) -> MensajesPage:
-        club = self._active_club(club_id)
-        hilo = self._repository.get_hilo_deportista(club.id, actor.id)
-        if hilo is None:
-            return MensajesPage(hilo_id=None, mensajes=[])
-        return self._page(hilo, "deportista", filters)
+        # hilo_id is None until the athlete writes for the first time.
+        found, hilo_id, mensajes = self._repository.mensajes_deportista(
+            club_id, actor.id,
+            after_id=filters.after_id, before_id=filters.before_id, limit=filters.limit,
+        )
+        if not found:
+            raise club_not_found()
+        return MensajesPage(hilo_id=hilo_id, mensajes=[_mensaje(m, "deportista") for m in mensajes])
 
     def send_as_athlete(self, actor: Actor, club_id: UUID, payload: MensajeCreate) -> Mensaje:
         club = self._active_club(club_id)
@@ -74,10 +82,8 @@ class ConsultaService:
         return _mensaje(mensaje, "deportista")
 
     def mark_read_as_athlete(self, actor: Actor, club_id: UUID, payload: LeidoUpdate) -> None:
-        club = self._active_club(club_id)
-        hilo = self._repository.get_hilo_deportista(club.id, actor.id)
-        if hilo is not None:
-            self._repository.mark_read(hilo.id, "deportista", payload.hasta_id)
+        if not self._repository.mark_read_deportista(club_id, actor.id, payload.hasta_id):
+            raise club_not_found()
 
     # -- club side (administrators) ------------------------------------------------------
 
@@ -97,8 +103,14 @@ class ConsultaService:
     def club_messages(
         self, actor: Actor, club_id: UUID, hilo_id: UUID, filters: MensajeFilters
     ) -> MensajesPage:
-        club = require_managed_club(self._repository, actor, club_id)
-        return self._page(self._club_thread(club, hilo_id), "club", filters)
+        if not actor.is_club_admin:
+            require_managed_club(self._repository, actor, club_id)  # raises 404 or 403
+        acceso, mensajes = self._repository.mensajes_club(
+            club_id, actor.id, hilo_id,
+            after_id=filters.after_id, before_id=filters.before_id, limit=filters.limit,
+        )
+        _check_acceso(acceso)
+        return MensajesPage(hilo_id=hilo_id, mensajes=[_mensaje(m, "club") for m in mensajes])
 
     def send_as_club(
         self, actor: Actor, club_id: UUID, hilo_id: UUID, payload: MensajeCreate
@@ -119,9 +131,11 @@ class ConsultaService:
     def mark_read_as_club(
         self, actor: Actor, club_id: UUID, hilo_id: UUID, payload: LeidoUpdate
     ) -> None:
-        club = require_managed_club(self._repository, actor, club_id)
-        hilo = self._club_thread(club, hilo_id)
-        self._repository.mark_read(hilo.id, "club", payload.hasta_id)
+        if not actor.is_club_admin:
+            require_managed_club(self._repository, actor, club_id)  # raises 404 or 403
+        _check_acceso(
+            self._repository.mark_read_club(club_id, actor.id, hilo_id, payload.hasta_id)
+        )
 
     # -- internals ---------------------------------------------------------------------
 
@@ -136,14 +150,22 @@ class ConsultaService:
         """A thread of that club; another club's thread is a 404, never a 403."""
         hilo = self._repository.get_hilo(hilo_id)
         if hilo is None or hilo.club_id != club.id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Consulta no encontrada.")
+            raise _thread_not_found()
         return hilo
 
-    def _page(self, hilo: StoredHilo, lado: Lado, filters: MensajeFilters) -> MensajesPage:
-        mensajes = self._repository.list_mensajes(
-            hilo.id, after_id=filters.after_id, before_id=filters.before_id, limit=filters.limit
-        )
-        return MensajesPage(hilo_id=hilo.id, mensajes=[_mensaje(m, lado) for m in mensajes])
+
+def _thread_not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Consulta no encontrada.")
+
+
+def _check_acceso(acceso: AccesoHilo) -> None:
+    """Same answers as require_managed_club followed by _club_thread."""
+    if acceso == "sin_club":
+        raise club_not_found()
+    if acceso == "no_admin":
+        raise not_club_admin()
+    if acceso == "sin_hilo":
+        raise _thread_not_found()
 
 
 def _mensaje(mensaje: StoredMensaje, lado: Lado) -> Mensaje:

@@ -17,8 +17,9 @@ Trabaja sobre las tablas existentes de la base `sportmatch_clubs` (`club`,
 `003_postulaciones.sql` la tabla `postulacion_convocatoria` y
 `004_revision_postulaciones.sql` los estados de revisión y el outbox de notificaciones y
 `005_comunicados.sql` las tablas de comunicados, `006_pagos.sql` planes, pagos y
-suscripciones, `007_club_rut_administradores.sql` el RUT del club, sus administradores
-e invitaciones y `008_consultas_club.sql` las consultas deportista ↔ club.
+suscripciones, `007_club_rut_administradores.sql` el RUT del club y sus administradores,
+`008_consultas_club.sql` las consultas deportista ↔ club y `009_admin_por_correo.sql`
+las asignaciones de administradores por correo (reemplazan a las invitaciones).
 
 ```
 app/
@@ -28,18 +29,19 @@ app/
   api/v1/postulaciones.py rutas de postulaciones y candidatos (/announcements/{id}/applications,
                           /announcements/applications/me, /announcements/applications/{id})
   api/v1/pagos.py         pagos con Webpay Plus (/api/v1/payments)
-  api/v1/administradores.py administradores e invitaciones (/{id}/admins, /admins/invitations/accept)
+  api/v1/administradores.py administradores y asignaciones por correo (/{id}/admins,
+                          /{id}/admins/assignments)
   api/v1/consultas.py     consultas deportista ↔ club (/consultas/me, /{id}/consultas)
   api/dependencies.py     inyección de repositorio y servicio; usuario autenticado (Bearer)
   core/config.py          DB_*, JWT_*, USERS_*, CLUB_MAX_ADMINS y WEBPAY_*
-  core/security.py        validación del JWT de Ms_Users y roles (club_admin, admin)
+  core/security.py        validación del JWT de Ms_Users, roles (club_admin, admin) y correo
   database/               comprobación de conexión al arranque, pool y migrador
   repositories/           contrato ClubRepository + PostgreSQL + mock en memoria
   schemas/                common.py (compartido), club.py (ClubCreate, ClubUpdate...),
                           convocatoria.py (ConvocatoriaCreate, filtros, respuestas),
                           postulacion.py (PostulacionCreate, PostulacionEstadoUpdate, candidatos),
                           pago.py (PagoIniciar, PagoConfirmar, comprobante, suscripción),
-                          administrador.py (invitaciones) y consulta.py (mensajes e hilos)
+                          administrador.py (asignaciones) y consulta.py (mensajes e hilos)
   services/               ClubService, ConvocatoriaService, PostulacionService,
                           PagoService, AdministradorService, ConsultaService,
                           authorization.py (administradores del club), rut.py (RUT y DV),
@@ -48,7 +50,8 @@ db/
   00_create_database.sql  rol sportmatch_clubs (una vez, en pgAdmin)
   migrations/             001: perfil; 002: convocatoria; 003: postulaciones; 004: revisión y outbox;
                           005: comunicados; 006: planes, pagos y suscripciones;
-                          007: RUT, administradores e invitaciones; 008: consultas
+                          007: RUT y administradores; 008: consultas;
+                          009: asignaciones de administradores por correo
   seeds/demo_planes.sql   planes de PRUEBA para desarrollo (no son el catálogo real)
                           (todas como postgres)
 tests/                    pruebas de la API con el repositorio mock
@@ -62,16 +65,15 @@ tests/                    pruebas de la API con el repositorio mock
 | GET | `/api/v1/clubs/deportes` | Público | Catálogo de deportes activos (para filtros y para asociar). |
 | GET | `/api/v1/clubs/{id}` | Público | Perfil público del club. |
 | POST | `/api/v1/clubs` | `club_admin` sin club | Crea el club con su RUT; quien lo crea queda como `PRINCIPAL`. |
-| GET | `/api/v1/clubs/me` | `club_admin` | Panel de edición: el club que administro, activo o no, con `mi_rol`. |
+| GET | `/api/v1/clubs/me` | `club_admin` | Panel de edición: el club que administro, activo o no, con `mi_rol`. Activa una asignación pendiente de mi correo. |
 | PATCH | `/api/v1/clubs/{id}` | admin del club | Edita el perfil y los deportes ofrecidos. |
 | PUT | `/api/v1/clubs/{id}/deportes/{deporte_id}` | admin del club | Asocia un deporte (idempotente). |
 | DELETE | `/api/v1/clubs/{id}/deportes/{deporte_id}` | admin del club | Quita un deporte (idempotente). |
 | GET | `/api/v1/clubs/{id}/admins` | admin del club | Administradores del club. |
 | DELETE | `/api/v1/clubs/{id}/admins/{usuario_id}` | principal o el mismo admin | Quita a un administrador o sale del club. |
-| POST | `/api/v1/clubs/{id}/admins/invitations` | admin del club | Crea un código de invitación (se muestra una sola vez). |
-| GET | `/api/v1/clubs/{id}/admins/invitations` | admin del club | Invitaciones vigentes, sin código. |
-| DELETE | `/api/v1/clubs/{id}/admins/invitations/{invitacion_id}` | admin del club | Revoca una invitación vigente. |
-| POST | `/api/v1/clubs/admins/invitations/accept` | `club_admin` sin club | Entra al club como `ADMIN` con un código. |
+| GET | `/api/v1/clubs/{id}/admins/assignments` | admin del club | Correos asignados pendientes. |
+| POST | `/api/v1/clubs/{id}/admins/assignments` | principal | Asigna un correo como administrador (queda pendiente). |
+| DELETE | `/api/v1/clubs/{id}/admins/assignments/{asignacion_id}` | principal | Revoca una asignación pendiente. |
 | GET | `/api/v1/clubs/consultas/me` | Deportista | Mis conversaciones con clubes. |
 | GET, POST | `/api/v1/clubs/{id}/consultas/me/messages` | Deportista | Leer y escribir mi consulta a un club. |
 | POST | `/api/v1/clubs/{id}/consultas/me/read` | Deportista | Marcar como leído. |
@@ -125,7 +127,8 @@ rol del claim `roles`:
   club (`club_administrador`, rol `PRINCIPAL` o `ADMIN`); si no, 403 `No administras
   este club.`. Ningún otro rol, ni `admin`, edita clubes. `club.usuario_id` queda
   solo como dato histórico de quién lo creó.
-- Una cuenta administra un único club (409 si intenta crear otro o aceptar una invitación).
+- Una cuenta administra un único club (409 si intenta crear otro; sus asignaciones de
+  otros clubes quedan pendientes).
 
 `ClubCreate` (POST) exige además `rut`, el RUT del club como persona jurídica. Acepta
 puntos y `k` minúscula (`76.123.456-k`) y se guarda normalizado (`76123456-K`). Se
@@ -324,29 +327,39 @@ se borran.
 ## Administradores del club
 
 Un club tiene varios administradores (cuentas `club_admin` de Ms_Users) en
-`club_administrador`: el `PRINCIPAL`, que lo creó, y los `ADMIN`, que entraron con una
-invitación. Cualquiera de ellos gestiona todo el club (perfil, deportes, convocatorias,
-candidatos, comunicados, consultas, invitaciones y pagos del club). El deportista que
-entra a un club no es administrador.
+`club_administrador`: el `PRINCIPAL`, que lo creó, y los `ADMIN`, que entraron porque el
+principal asignó su correo. Cualquiera de ellos gestiona el club (perfil, deportes,
+convocatorias, candidatos, comunicados, consultas y pagos del club) y ve la lista de
+administradores y de asignaciones pendientes. El deportista que entra a un club no es
+administrador.
 
-- **Invitar.** `POST /{club_id}/admins/invitations` genera un código de 10 caracteres
-  (`secrets`, mayúsculas y dígitos sin los ambiguos `0 O 1 I L`) que vence en 72 h y
-  sirve una sola vez. Se muestra solo en esa respuesta: la base guarda su SHA-256.
-  `409` si los administradores más las invitaciones vigentes ya llegan a
-  `CLUB_MAX_ADMINS` (por defecto 10; entre 3 y 100). `GET` lista las vigentes sin el
-  código y `DELETE .../invitations/{id}` revoca una (404 si no está vigente o es de otro club).
-- **Aceptar.** `POST /api/v1/clubs/admins/invitations/accept` con `{"codigo": "..."}`
-  (se ignoran espacios, guiones y mayúsculas). La cuenta debe tener rol `club_admin` y
-  no administrar otro club (`409`). Un código inexistente, vencido, usado o revocado
-  responde siempre el mismo `404`. La invitación se marca usada y la cuenta se agrega
-  como `ADMIN` en una sola transacción: con el mismo código, solo una cuenta entra.
+- **Correo en el token.** Ms_Users agrega al access token el claim `email` (minúsculas;
+  solo se emite con el correo verificado). `Actor.email` lo lee si es un texto con forma
+  de correo; si falta o no sirve queda en `None` sin invalidar el token (tokens antiguos).
+- **Asignar.** `POST /{club_id}/admins/assignments` con `{"email": "..."}`, solo el
+  `PRINCIPAL` (`403` si no). El correo se valida con `email-validator` (`422` si no es
+  válido) y se guarda en minúsculas. `409` si ya está pendiente en este club, si es el
+  correo del propio principal (claim `email`), si ya administra este club o si los
+  administradores más las asignaciones pendientes llegan a `CLUB_MAX_ADMINS` (por defecto
+  10; entre 3 y 100). La respuesta (`{id, email, asignada_por, fecha_creacion}`) **nunca
+  indica si existe una cuenta con ese correo**. `GET` lista las pendientes (la más
+  reciente primero) y `DELETE .../assignments/{id}` revoca una (solo el `PRINCIPAL`;
+  `404` si no existe, es de otro club o ya no está pendiente).
+- **Activar.** En `GET /api/v1/clubs/me`, si la cuenta es `club_admin`, no administra
+  ningún club y su token trae `email`, se toma en una transacción (`FOR UPDATE`) la
+  asignación pendiente más antigua de ese correo en un club activo: se crea su fila `ADMIN`
+  (`agregado_por` = quien asignó) y la asignación queda aceptada. Una cuenta de deportista
+  con ese correo nunca la activa. Si la cuenta ya administra un club, sus asignaciones de
+  otros clubes siguen pendientes. Sin asignación, `404` como antes.
 - **Quitar y salir.** `DELETE /{club_id}/admins/{usuario_id}`: el `PRINCIPAL` quita a un
   `ADMIN`; un `ADMIN` sale con su propio `usuario_id` y no puede quitar a otros (`403`).
   El `PRINCIPAL` no puede ser quitado ni salir (`409`; el traspaso queda pendiente).
-  Alguien que no es administrador de ese club responde `404`.
-- **Nombre.** Al crear el club o aceptar una invitación se pide a Ms_Users el perfil de
-  la propia cuenta con su token (`GET /api/v1/users/{id}/profile`) y se guarda
-  "nombre apellido". Si Ms_Users falla se guarda `Administrador del club`: nunca bloquea.
+  Alguien que no es administrador de ese club responde `404`. Para devolverle el acceso
+  a alguien se asigna su correo de nuevo.
+- **Nombre.** Al crear el club o al activar una asignación se pide a Ms_Users el perfil
+  de la propia cuenta con su token (`GET /api/v1/users/{id}/profile`) y se guarda
+  "nombre apellido"; en `/me` solo se pide cuando hay una asignación que activar. Si
+  Ms_Users falla se guarda `Administrador del club`: nunca bloquea.
 
 ## Consultas deportista ↔ club (HU-51)
 
@@ -367,6 +380,10 @@ respuestas firmadas por el club, nunca por la persona (no se expone `autor_id`).
   devuelve el mismo mensaje (`201`) sin duplicarlo ni volver a avisar.
 - Paginación: orden ascendente por `id`; `after_id` trae los siguientes, `before_id` los
   anteriores y sin ninguno, los últimos; `limit` de 1 a 100 (50 por defecto).
+- Sondeo con pocos recursos (sección F del contrato): leer mensajes (`GET .../messages`)
+  y marcar leído (`POST .../read`) usan, de cada lado, una sola conexión y una sola
+  sentencia SQL que comprueba el club, el permiso y la conversación; nunca llaman a
+  Ms_Users. Marcar leído no escribe si la marca no avanza.
 - Leídos: `{"hasta_id": n}` avanza la marca de ese lado (nunca retrocede ni pasa del
   último mensaje). `no_leidos` cuenta los mensajes del otro lado posteriores a la marca;
   del lado del club la marca es compartida.
@@ -459,7 +476,8 @@ Una vez, en pgAdmin conectado a `sportmatch_clubs` como `postgres`, en este orde
 7. `db/migrations/006_pagos.sql`.
 8. `db/migrations/007_club_rut_administradores.sql`.
 9. `db/migrations/008_consultas_club.sql`.
-10. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
+10. `db/migrations/009_admin_por_correo.sql`.
+11. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
 
 ```bash
 pip install -e ".[dev]"

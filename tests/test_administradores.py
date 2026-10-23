@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -14,11 +12,11 @@ from app.core.security import Actor
 from app.main import create_app
 from app.repositories.base import ClubSport, StoredClub
 from app.repositories.mock_club_repository import MockClubRepository
-from app.services.administrador_service import CODIGO_ALFABETO, CODIGO_LARGO
 from app.services.rut import normalizar_rut
 
 CLUBS_PATH = "/api/v1/clubs"
-ACCEPT_PATH = "/api/v1/clubs/admins/invitations/accept"
+ME_PATH = "/api/v1/clubs/me"
+PRINCIPAL_EMAIL = "paula.rojas@correo.cl"
 
 
 class FakeNames:
@@ -27,11 +25,18 @@ class FakeNames:
     def __init__(self) -> None:
         self.names: dict[UUID, str] = {}
         self.fail = False
+        self.calls = 0
 
     def display_name(self, actor: Actor) -> str | None:
+        self.calls += 1
         if self.fail:
             raise RuntimeError("Ms_Users caído")
         return self.names.get(actor.id)
+
+
+def correo() -> str:
+    """A different email on every call."""
+    return f"admin.{uuid4().hex[:12]}@correo.cl"
 
 
 class Admins:
@@ -43,7 +48,7 @@ class Admins:
         self.client = TestClient(create_app(repository=self.repository, users=self.names))
         self.principal = uuid4()
         self.names.names[self.principal] = "Paula Rojas"
-        self.principal_headers = token(self.principal)
+        self.principal_headers = token(self.principal, email=PRINCIPAL_EMAIL)
         response = self.client.post(
             CLUBS_PATH, headers=self.principal_headers,
             json={"nombre": "Club Ñuñoa", "rut": nuevo_rut(), "deporte_ids": [1]},
@@ -53,29 +58,41 @@ class Admins:
 
     def other_club(self) -> tuple[UUID, dict]:
         """A second club in the same service, with its own PRINCIPAL."""
-        headers = token(uuid4())
+        headers = token(uuid4(), email=correo())
         response = self.client.post(
             CLUBS_PATH, headers=headers, json={"nombre": "Club Vecino", "rut": nuevo_rut()}
         )
         assert response.status_code == 201, response.text
         return UUID(response.json()["id"]), headers
 
-    def invite(self, headers: dict | None = None, club_id: object = None):
+    def assign(self, email: str, headers: dict | None = None, club_id: object = None):
         return self.client.post(
-            f"{CLUBS_PATH}/{club_id or self.club_id}/admins/invitations",
+            f"{CLUBS_PATH}/{club_id or self.club_id}/admins/assignments",
+            headers=headers or self.principal_headers, json={"email": email},
+        )
+
+    def assignments(self, headers: dict | None = None, club_id: object = None):
+        return self.client.get(
+            f"{CLUBS_PATH}/{club_id or self.club_id}/admins/assignments",
             headers=headers or self.principal_headers,
         )
 
-    def accept(self, codigo: str, headers: dict):
-        return self.client.post(ACCEPT_PATH, headers=headers, json={"codigo": codigo})
+    def revoke(self, asignacion_id: object, headers: dict | None = None, club_id: object = None):
+        return self.client.delete(
+            f"{CLUBS_PATH}/{club_id or self.club_id}/admins/assignments/{asignacion_id}",
+            headers=headers or self.principal_headers,
+        )
+
+    def me(self, headers: dict):
+        return self.client.get(ME_PATH, headers=headers)
 
     def new_admin(self, nombre: str = "Andrés Soto") -> tuple[UUID, dict]:
-        """An account that joined the club with an invitation."""
-        usuario = uuid4()
+        """An account that joined the club through an assigned email."""
+        usuario, email = uuid4(), correo()
         self.names.names[usuario] = nombre
-        codigo = self.invite().json()["codigo"]
-        headers = token(usuario)
-        assert self.accept(codigo, headers).status_code == 200
+        assert self.assign(email).status_code == 201
+        headers = token(usuario, email=email)
+        assert self.me(headers).status_code == 200
         return usuario, headers
 
     def admins(self, headers: dict | None = None):
@@ -239,117 +256,124 @@ def test_after_leaving_an_admin_no_longer_manages_the_club():
     assert setup.client.get(f"{CLUBS_PATH}/me", headers=headers).status_code == 404
 
 
-# -- invitations ----------------------------------------------------------------------------
+# -- token email claim -------------------------------------------------------------------
 
 
-def test_invitation_code_is_shown_once_and_only_its_hash_is_stored():
+@pytest.mark.parametrize(
+    ("claim", "expected"),
+    [
+        ("  Ana.Soto@Correo.CL ", "ana.soto@correo.cl"),
+        ("ana@correo.cl", "ana@correo.cl"),
+        (None, None),
+        (123, None),
+        (["ana@correo.cl"], None),
+        ("", None),
+        ("sin-arroba", None),
+        ("ana soto@correo.cl", None),
+        ("a" * 250 + "@correo.cl", None),
+    ],
+)
+def test_email_claim_is_optional_and_never_breaks_the_token(claim, expected):
+    from app.core.security import authenticate
+
+    extra = {} if claim is None else {"email": claim}
+    bearer = token(uuid4(), **extra)["Authorization"].removeprefix("Bearer ")
+    assert authenticate(bearer).email == expected
+
+
+# -- assigning emails (sección E) ------------------------------------------------------------
+
+
+def test_principal_assigns_an_email_that_stays_pending():
     setup = Admins()
-    response = setup.invite()
+    response = setup.assign("  Andres.Soto@Correo.CL ")
     assert response.status_code == 201, response.text
     created = response.json()
-    codigo = created["codigo"]
-    assert len(codigo) == CODIGO_LARGO and set(codigo) <= set(CODIGO_ALFABETO)
-    expira = datetime.fromisoformat(created["expira_en"])
-    assert timedelta(hours=71) < expira - datetime.now(timezone.utc) <= timedelta(hours=72)
-
-    stored = setup.repository.list_invitaciones(setup.club_id)[0]
-    assert stored.codigo_hash == hashlib.sha256(codigo.encode()).hexdigest()
-    assert codigo not in repr(stored)
-
-    listed = setup.client.get(f"{CLUBS_PATH}/{setup.club_id}/admins/invitations", headers=setup.principal_headers)
-    assert listed.status_code == 200
-    assert listed.json() == [{
-        "id": created["id"], "creada_por": str(setup.principal),
-        "fecha_creacion": listed.json()[0]["fecha_creacion"], "expira_en": created["expira_en"],
-    }]
-    assert "codigo" not in listed.text and codigo not in listed.text
+    assert set(created) == {"id", "email", "asignada_por", "fecha_creacion"}
+    assert created["email"] == "andres.soto@correo.cl"
+    assert created["asignada_por"] == str(setup.principal)
+    assert setup.assignments().json() == [created]
+    # Nobody is an administrator until that person opens the app.
+    assert [a["rol"] for a in setup.admins().json()] == ["PRINCIPAL"]
 
 
-def test_accepting_an_invitation_joins_the_club_as_admin():
+def test_the_answer_never_reveals_whether_an_account_exists():
     setup = Admins()
-    usuario = uuid4()
-    setup.names.names[usuario] = "Andrés Soto"
-    codigo = setup.invite().json()["codigo"]
-    # Typed in lower case and with a dash, it still matches.
-    response = setup.accept(f"{codigo[:5].lower()}-{codigo[5:]}", token(usuario))
-    assert response.status_code == 200, response.text
-    assert response.json()["id"] == str(setup.club_id)
-    admins = setup.admins().json()
-    assert [(a["nombre"], a["rol"]) for a in admins] == [("Paula Rojas", "PRINCIPAL"), ("Andrés Soto", "ADMIN")]
-    # A used invitation is no longer pending.
-    assert setup.client.get(
-        f"{CLUBS_PATH}/{setup.club_id}/admins/invitations", headers=setup.principal_headers
-    ).json() == []
-
-
-def test_used_expired_revoked_or_unknown_codes_get_the_same_404():
-    setup = Admins()
-    used = setup.invite().json()["codigo"]
-    assert setup.accept(used, token(uuid4())).status_code == 200
-
-    expired = setup.invite().json()
-    setup.repository.set_invitacion_expira(
-        UUID(expired["id"]), datetime.now(timezone.utc) - timedelta(seconds=1)
+    # An account that exists, with a verified email: it created another club.
+    existing = correo()
+    created = setup.client.post(
+        CLUBS_PATH, headers=token(uuid4(), email=existing), json={"nombre": "Otro", "rut": nuevo_rut()}
     )
-
-    revoked = setup.invite().json()
-    revoke = setup.client.delete(
-        f"{CLUBS_PATH}/{setup.club_id}/admins/invitations/{revoked['id']}", headers=setup.principal_headers
-    )
-    assert revoke.status_code == 204
-
-    answers = [
-        setup.accept(codigo, token(uuid4()))
-        for codigo in (used, expired["codigo"], revoked["codigo"], "ABCDEFGHJK")
+    assert created.status_code == 201
+    answers = [setup.assign(existing), setup.assign(correo())]
+    assert [r.status_code for r in answers] == [201, 201]
+    shapes = [
+        {k: v for k, v in r.json().items() if k not in ("id", "email", "fecha_creacion")}
+        for r in answers
     ]
-    assert {r.status_code for r in answers} == {404}
-    assert len({r.text for r in answers}) == 1
-    assert answers[0].json() == {"detail": "Código de invitación inválido o vencido."}
-    assert len(setup.admins().json()) == 2
+    assert shapes[0] == shapes[1]
+    assert len(setup.assignments().json()) == 2
 
 
-def test_an_account_that_already_administers_a_club_cannot_accept():
+def test_an_admin_can_neither_assign_nor_revoke():
     setup = Admins()
-    _, other_headers = setup.other_club()
-    codigo = setup.invite().json()["codigo"]
-    response = setup.accept(codigo, other_headers)
+    _, headers = setup.new_admin()
+    pending = setup.assign(correo()).json()
+    response = setup.assign(correo(), headers)
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Solo el administrador principal puede asignar administradores."}
+    assert setup.revoke(pending["id"], headers).status_code == 403
+    # Any administrator sees the pending ones.
+    listed = setup.assignments(headers)
+    assert listed.status_code == 200 and [a["id"] for a in listed.json()] == [pending["id"]]
+
+
+def test_an_email_already_pending_in_the_club_is_a_409():
+    setup = Admins()
+    assert setup.assign("andres@correo.cl").status_code == 201
+    again = setup.assign("ANDRES@correo.cl")
+    assert again.status_code == 409
+    assert again.json() == {"detail": "Ese correo ya tiene una asignación pendiente en este club."}
+    assert len(setup.assignments().json()) == 1
+    # Another club may assign the same email: it stays pending in both.
+    other_id, other_headers = setup.other_club()
+    assert setup.assign("andres@correo.cl", other_headers, other_id).status_code == 201
+
+
+def test_assigning_your_own_email_is_a_409():
+    setup = Admins()
+    response = setup.assign(PRINCIPAL_EMAIL.upper())
     assert response.status_code == 409
-    # The invitation is still usable by someone else.
-    assert setup.accept(codigo, token(uuid4())).status_code == 200
+    assert "propio correo" in response.json()["detail"]
+    assert setup.assignments().json() == []
 
 
-@pytest.mark.parametrize("role", ["player", "usuario", "admin"])
-def test_only_club_admin_accounts_accept_invitations(role):
+def test_the_email_of_a_current_admin_is_a_409():
     setup = Admins()
-    codigo = setup.invite().json()["codigo"]
-    assert setup.accept(codigo, token(uuid4(), role)).status_code == 403
+    usuario, email = uuid4(), correo()
+    setup.assign(email)
+    assert setup.me(token(usuario, email=email)).status_code == 200
+    response = setup.assign(email)
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Ese correo ya administra este club."}
+    # Once removed, the email can be assigned again to give the access back.
+    assert setup.remove(usuario, setup.principal_headers).status_code == 204
+    assert setup.assign(email).status_code == 201
+    assert setup.me(token(usuario, email=email)).json()["mi_rol"] == "ADMIN"
 
 
-def test_maximum_of_admins_counts_pending_invitations(monkeypatch):
+def test_maximum_of_admins_counts_pending_assignments(monkeypatch):
     monkeypatch.setenv("CLUB_MAX_ADMINS", "3")
     setup = Admins()
     setup.new_admin()  # 2 admins
-    pending = setup.invite()  # + 1 pending = 3
+    pending = setup.assign(correo())  # + 1 pending = 3
     assert pending.status_code == 201
-    full = setup.invite()
+    full = setup.assign(correo())
     assert full.status_code == 409
     assert "máximo de 3" in full.json()["detail"]
     # Revoking the pending one frees the place.
-    setup.client.delete(
-        f"{CLUBS_PATH}/{setup.club_id}/admins/invitations/{pending.json()['id']}",
-        headers=setup.principal_headers,
-    )
-    assert setup.invite().status_code == 201
-
-
-def test_expired_invitations_do_not_count_for_the_maximum(monkeypatch):
-    monkeypatch.setenv("CLUB_MAX_ADMINS", "3")
-    setup = Admins()
-    first, second = setup.invite().json(), setup.invite().json()
-    assert setup.invite().status_code == 409
-    setup.repository.set_invitacion_expira(UUID(first["id"]), datetime.now(timezone.utc) - timedelta(minutes=1))
-    assert setup.invite().status_code == 201
-    assert second["id"] != first["id"]
+    assert setup.revoke(pending.json()["id"]).status_code == 204
+    assert setup.assign(correo()).status_code == 201
 
 
 @pytest.mark.parametrize("value", ["2", "abc", "1000"])
@@ -361,36 +385,80 @@ def test_wrong_max_admins_configuration_is_refused(monkeypatch, value):
         get_club_max_admins()
 
 
-def test_any_admin_invites_and_revokes():
+@pytest.mark.parametrize(
+    "email",
+    [
+        "no-es-correo",
+        "ana@localhost",
+        "ana@",
+        "@correo.cl",
+        "ana soto@correo.cl",
+        "a" * 64 + "@" + "b" * 63 + "." + "c" * 63 + "." + "d" * 63 + ".cl",
+    ],
+)
+def test_invalid_email_is_a_422(email):
     setup = Admins()
-    _, headers = setup.new_admin()
-    created = setup.invite(headers)
-    assert created.status_code == 201
-    revoke = setup.client.delete(
-        f"{CLUBS_PATH}/{setup.club_id}/admins/invitations/{created.json()['id']}", headers=headers
+    response = setup.assign(email)
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("Correo inválido")
+    assert setup.assignments().json() == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"email": 123}, {"email": ""}, {"email": "   "},
+     {"email": "ana@correo.cl", "usuario_id": str(uuid4())}],
+)
+def test_malformed_body_is_rejected_like_any_other_input(body):
+    setup = Admins()
+    response = setup.client.post(
+        f"{CLUBS_PATH}/{setup.club_id}/admins/assignments", headers=setup.principal_headers, json=body
     )
-    assert revoke.status_code == 204
-    again = setup.client.delete(
-        f"{CLUBS_PATH}/{setup.club_id}/admins/invitations/{created.json()['id']}", headers=headers
-    )
+    assert response.status_code == 400
+    assert setup.assignments().json() == []
+
+
+def test_list_shows_only_pending_assignments_newest_first():
+    setup = Admins()
+    accepted_email = correo()
+    setup.assign(accepted_email)
+    setup.me(token(uuid4(), email=accepted_email))
+    revoked = setup.assign(correo()).json()
+    setup.revoke(revoked["id"])
+    first = setup.assign(correo()).json()
+    second = setup.assign(correo()).json()
+    assert [a["id"] for a in setup.assignments().json()] == [second["id"], first["id"]]
+
+
+def test_revoking_only_works_once_and_only_on_pending_assignments():
+    setup = Admins()
+    pending = setup.assign(correo()).json()
+    assert setup.revoke(pending["id"]).status_code == 204
+    again = setup.revoke(pending["id"])
     assert again.status_code == 404
+    assert again.json() == {"detail": "Asignación no encontrada o ya no está pendiente."}
+
+    email = correo()
+    accepted = setup.assign(email).json()
+    setup.me(token(uuid4(), email=email))
+    assert setup.revoke(accepted["id"]).status_code == 404
+    assert setup.revoke(uuid4()).status_code == 404
 
 
-def test_another_clubs_invitation_cannot_be_revoked():
+def test_another_clubs_assignment_cannot_be_revoked():
     setup = Admins()
     other_id, other_headers = setup.other_club()
-    invitacion = setup.invite(other_headers, club_id=other_id).json()
-    response = setup.client.delete(
-        f"{CLUBS_PATH}/{setup.club_id}/admins/invitations/{invitacion['id']}", headers=setup.principal_headers
-    )
-    assert response.status_code == 404
-    joined = setup.accept(invitacion["codigo"], token(uuid4()))
+    email = correo()
+    asignacion = setup.assign(email, other_headers, other_id).json()
+    assert setup.revoke(asignacion["id"]).status_code == 404
+    joined = setup.me(token(uuid4(), email=email))
     assert joined.status_code == 200 and joined.json()["id"] == str(other_id)
 
 
 @pytest.mark.parametrize("who", ["another club", "player", "no token"])
 def test_outsiders_cannot_see_or_manage_admins(who):
     setup = Admins()
+    pending = setup.assign(correo()).json()
     headers = {
         "another club": setup.other_club()[1],
         "player": token(uuid4(), "player"),
@@ -400,12 +468,134 @@ def test_outsiders_cannot_see_or_manage_admins(who):
     path = f"{CLUBS_PATH}/{setup.club_id}/admins"
     attempts = [
         setup.client.get(path, headers=headers),
-        setup.client.post(f"{path}/invitations", headers=headers),
-        setup.client.get(f"{path}/invitations", headers=headers),
+        setup.client.post(f"{path}/assignments", headers=headers, json={"email": correo()}),
+        setup.client.get(f"{path}/assignments", headers=headers),
+        setup.client.delete(f"{path}/assignments/{pending['id']}", headers=headers),
         setup.client.delete(f"{path}/{setup.principal}", headers=headers),
     ]
-    assert [r.status_code for r in attempts] == [expected] * 4
-    assert setup.repository.list_invitaciones(setup.club_id) == []
+    assert [r.status_code for r in attempts] == [expected] * 5
+    assert [a.id for a in setup.repository.list_asignaciones(setup.club_id)] == [UUID(pending["id"])]
+
+
+def test_invitation_routes_no_longer_exist():
+    setup = Admins()
+    path = f"{CLUBS_PATH}/{setup.club_id}/admins/invitations"
+    assert setup.client.post(path, headers=setup.principal_headers).status_code in (404, 405)
+    assert setup.client.get(path, headers=setup.principal_headers).status_code in (404, 405)
+    accept = setup.client.post(
+        f"{CLUBS_PATH}/admins/invitations/accept", headers=setup.principal_headers,
+        json={"codigo": "ABCDEFGHJK"},
+    )
+    assert accept.status_code in (404, 405)
+
+
+# -- activation on GET /clubs/me --------------------------------------------------------------
+
+
+def test_a_club_admin_with_the_assigned_email_becomes_admin_on_me():
+    setup = Admins()
+    usuario, email = uuid4(), "andres.soto@correo.cl"
+    setup.names.names[usuario] = "Andrés Soto"
+    setup.assign("Andres.Soto@correo.cl")
+    response = setup.me(token(usuario, email=email))
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == str(setup.club_id) and response.json()["mi_rol"] == "ADMIN"
+    admins = setup.admins().json()
+    assert [(a["nombre"], a["rol"]) for a in admins] == [("Paula Rojas", "PRINCIPAL"), ("Andrés Soto", "ADMIN")]
+    assert setup.repository.get_admin(setup.club_id, usuario).agregado_por == setup.principal
+    assert setup.assignments().json() == []
+    # Later calls just read the club.
+    assert setup.me(token(usuario, email=email)).json()["mi_rol"] == "ADMIN"
+
+
+def test_the_token_email_claim_is_compared_in_lower_case():
+    setup = Admins()
+    setup.assign("ana@correo.cl")
+    assert setup.me(token(uuid4(), email="ANA@Correo.cl")).status_code == 200
+
+
+def test_without_email_claim_nothing_is_activated():
+    setup = Admins()
+    setup.assign("ana@correo.cl")
+    response = setup.me(token(uuid4()))
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Aún no tienes un club."}
+    assert len(setup.assignments().json()) == 1
+
+
+def test_an_athlete_with_the_assigned_email_never_activates_it():
+    from app.core.security import ATHLETE_ROLES
+    from app.services.club_service import ClubService
+
+    setup = Admins()
+    setup.assign("ana@correo.cl")
+    # The route only lets club_admin accounts in.
+    assert setup.me(token(uuid4(), "player", email="ana@correo.cl")).status_code == 403
+    # And the service checks the role again.
+    service = ClubService(setup.repository, setup.names)
+    for role in ATHLETE_ROLES:
+        actor = Actor(id=uuid4(), roles=frozenset({role}), email="ana@correo.cl")
+        with pytest.raises(Exception) as error:
+            service.my_club(actor)
+        assert getattr(error.value, "status_code", None) == 404
+    assert len(setup.assignments().json()) == 1
+
+
+def test_an_account_that_already_administers_a_club_does_not_activate_it():
+    setup = Admins()
+    other_id, _ = setup.other_club()
+    other_principal = setup.repository.list_admins(other_id)[0].usuario_id
+    email = correo()
+    setup.assign(email)
+    mine = setup.me(token(other_principal, email=email))
+    assert mine.status_code == 200 and mine.json()["id"] == str(other_id)
+    # It stays pending: one person, one club.
+    assert [a["email"] for a in setup.assignments().json()] == [email]
+    assert len(setup.admins().json()) == 1
+
+
+def test_a_revoked_assignment_is_not_activated():
+    setup = Admins()
+    email = correo()
+    setup.revoke(setup.assign(email).json()["id"])
+    assert setup.me(token(uuid4(), email=email)).status_code == 404
+    assert len(setup.admins().json()) == 1
+
+
+def test_an_assignment_of_an_inactive_club_is_not_activated():
+    setup = Admins()
+    email = correo()
+    setup.assign(email)
+    setup.repository.update_club(setup.club_id, {"is_active": False})
+    assert setup.me(token(uuid4(), email=email)).status_code == 404
+
+
+def test_with_two_clubs_pending_the_oldest_assignment_wins():
+    setup = Admins()
+    other_id, other_headers = setup.other_club()
+    email = correo()
+    assert setup.assign(email, other_headers, other_id).status_code == 201  # older
+    assert setup.assign(email).status_code == 201
+    joined = setup.me(token(uuid4(), email=email))
+    assert joined.json()["id"] == str(other_id)
+    assert [a["email"] for a in setup.assignments().json()] == [email]
+    assert setup.assignments(other_headers, other_id).json() == []
+
+
+def test_ms_users_is_asked_for_the_name_only_when_something_is_activated():
+    setup = Admins()
+    calls = setup.names.calls
+    assert setup.me(token(uuid4(), email=correo())).status_code == 404
+    assert setup.me(setup.principal_headers).status_code == 200
+    assert setup.names.calls == calls
+    email = correo()
+    setup.assign(email)
+    setup.names.fail = True
+    usuario = uuid4()
+    assert setup.me(token(usuario, email=email)).status_code == 200
+    assert setup.names.calls == calls + 1
+    # Ms_Users failing never blocks the activation: a neutral name is used.
+    assert setup.repository.get_admin(setup.club_id, usuario).nombre == "Administrador del club"
 
 
 # -- removing and leaving -------------------------------------------------------------------
@@ -438,9 +628,9 @@ def test_principal_can_neither_leave_nor_be_removed():
 def test_principal_cannot_remove_someone_of_another_club():
     setup = Admins()
     other_id, other_headers = setup.other_club()
-    stranger = uuid4()
-    codigo = setup.invite(other_headers, club_id=other_id).json()["codigo"]
-    assert setup.accept(codigo, token(stranger)).status_code == 200
+    stranger, email = uuid4(), correo()
+    setup.assign(email, other_headers, other_id)
+    assert setup.me(token(stranger, email=email)).status_code == 200
     assert setup.remove(stranger, setup.principal_headers).status_code == 404
     other_admins = setup.client.get(f"{CLUBS_PATH}/{other_id}/admins", headers=other_headers).json()
     assert len(other_admins) == 2
@@ -448,9 +638,14 @@ def test_principal_cannot_remove_someone_of_another_club():
 
 def test_after_leaving_the_account_may_join_another_club():
     setup = Admins()
-    usuario, headers = setup.new_admin()
+    usuario, email = uuid4(), correo()
+    setup.assign(email)
+    headers = token(usuario, email=email)
+    assert setup.me(headers).status_code == 200
     assert setup.remove(usuario, headers).status_code == 204
+    # The accepted assignment is not activated again.
+    assert setup.me(headers).status_code == 404
     other_id, other_headers = setup.other_club()
-    codigo = setup.invite(other_headers, club_id=other_id).json()["codigo"]
-    joined = setup.accept(codigo, headers)
+    setup.assign(email, other_headers, other_id)
+    joined = setup.me(headers)
     assert joined.status_code == 200 and joined.json()["id"] == str(other_id)
