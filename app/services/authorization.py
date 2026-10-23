@@ -12,6 +12,10 @@ def club_not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Club no encontrado.")
 
 
+def not_club_admin() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No administras este club.")
+
+
 def require_club_admin(
     repository: ClubRepository, actor: Actor, club_id: UUID
 ) -> tuple[StoredClub, StoredAdmin]:
@@ -29,10 +33,10 @@ def require_club_admin(
         admin = repository.get_admin(club.id, actor.id)
         if admin is not None:
             return club, admin
-    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No administras este club.")
+    raise not_club_admin()
 
 
 def require_managed_club(repository: ClubRepository, actor: Actor, club_id: UUID) -> StoredClub:
     """The club an administrator manages (profile, sports, convocatorias,
-    postulaciones, comunicados, consultas, invitations)."""
+    postulaciones, comunicados, consultas, assignments)."""
     return require_club_admin(repository, actor, club_id)[0]

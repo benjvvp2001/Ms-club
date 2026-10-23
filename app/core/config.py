@@ -73,7 +73,7 @@ CLUB_MAX_ADMINS_DEFAULT = 10
 
 
 def get_club_max_admins() -> int:
-    """How many administrators a club may have, counting pending invitations.
+    """How many administrators a club may have, counting pending assignments.
     The product asks for at least 3."""
     raw = os.getenv("CLUB_MAX_ADMINS", str(CLUB_MAX_ADMINS_DEFAULT)).strip()
     try:

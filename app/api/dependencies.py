@@ -34,14 +34,13 @@ def get_club_service(
     repository: ClubRepository = Depends(get_repository),
     names: AccountNames | None = Depends(get_account_names),
 ) -> ClubService:
-    return ClubService(repository, names)
+    return ClubService(repository, names, get_club_max_admins())
 
 
 def get_administrador_service(
     repository: ClubRepository = Depends(get_repository),
-    names: AccountNames | None = Depends(get_account_names),
 ) -> AdministradorService:
-    return AdministradorService(repository, names, get_club_max_admins())
+    return AdministradorService(repository, get_club_max_admins())
 
 
 def get_consulta_service(

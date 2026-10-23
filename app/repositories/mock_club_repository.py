@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -10,19 +9,21 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from app.repositories.base import (
-    AcceptResult,
+    AccesoHilo,
     ApplyResult,
+    AsignarResult,
+    ClaimResult,
     ClubSport,
     CreateClubResult,
     OutboxEvent,
     OutboxMessage,
     ReviewResult,
     StoredAdmin,
+    StoredAsignacion,
     StoredClub,
     StoredComunicado,
     StoredConvocatoria,
     StoredHilo,
-    StoredInvitacion,
     StoredMensaje,
     StoredPlan,
     StoredPostulacion,
@@ -65,7 +66,7 @@ class MockClubRepository:
         self._destinatarios: dict[UUID, set[UUID]] = {}
         # club_administrador by usuario_id (one club per account).
         self._admins: dict[UUID, StoredAdmin] = {}
-        self._invitaciones: dict[UUID, StoredInvitacion] = {}
+        self._asignaciones: dict[UUID, StoredAsignacion] = {}
         self._hilos: dict[UUID, dict[str, Any]] = {}
         self._mensajes: list[StoredMensaje] = []
         for club in clubs or []:
@@ -177,7 +178,7 @@ class MockClubRepository:
         club = self._clubs[club_id]
         club.deportes = [sport for sport in club.deportes if sport.id != deporte_id]
 
-    # -- administradores e invitaciones ---------------------------------------------
+    # -- administradores y asignaciones por correo ----------------------------------
 
     def get_admin(self, club_id: UUID, usuario_id: UUID) -> StoredAdmin | None:
         admin = self._admins.get(usuario_id)
@@ -196,62 +197,72 @@ class MockClubRepository:
         del self._admins[usuario_id]
         return True
 
-    def create_invitacion(
-        self, club_id: UUID, creada_por: UUID, codigo_hash: str, horas: int, max_admins: int
-    ) -> StoredInvitacion | None:
-        if len(self.list_admins(club_id)) + len(self.list_invitaciones(club_id)) >= max_admins:
-            return None
-        now = self._tick()
-        invitacion = StoredInvitacion(
-            id=uuid4(), club_id=club_id, codigo_hash=codigo_hash, creada_por=creada_por,
-            fecha_creacion=now, expira_en=now + timedelta(hours=horas),
+    def create_asignacion(
+        self, club_id: UUID, email: str, asignada_por: UUID, max_admins: int
+    ) -> tuple[AsignarResult, StoredAsignacion | None]:
+        pendientes = self.list_asignaciones(club_id)
+        if any(a.email == email for a in pendientes):
+            return "duplicada", None
+        if any(
+            a.club_id == club_id and a.email == email and a.aceptada_por is not None
+            and self.get_admin(club_id, a.aceptada_por) is not None
+            for a in self._asignaciones.values()
+        ):
+            return "ya_administra", None
+        if len(self.list_admins(club_id)) + len(pendientes) >= max_admins:
+            return "sin_cupo", None
+        asignacion = StoredAsignacion(
+            id=uuid4(), club_id=club_id, email=email, asignada_por=asignada_por,
+            fecha_creacion=self._tick(),
         )
-        self._invitaciones[invitacion.id] = invitacion
-        return invitacion
+        self._asignaciones[asignacion.id] = asignacion
+        return "creada", asignacion
 
-    def list_invitaciones(self, club_id: UUID) -> list[StoredInvitacion]:
-        now = datetime.now(timezone.utc)
+    def list_asignaciones(self, club_id: UUID) -> list[StoredAsignacion]:
         return sorted(
-            (i for i in self._invitaciones.values() if i.club_id == club_id and _vigente(i, now)),
-            key=lambda i: (i.fecha_creacion, str(i.id)),
+            (a for a in self._asignaciones.values() if a.club_id == club_id and _pendiente(a)),
+            key=lambda a: (a.fecha_creacion, str(a.id)),
             reverse=True,
         )
 
-    def revoke_invitacion(self, club_id: UUID, invitacion_id: UUID) -> bool:
-        invitacion = self._invitaciones.get(invitacion_id)
-        if invitacion is None or invitacion.club_id != club_id:
+    def revoke_asignacion(self, club_id: UUID, asignacion_id: UUID) -> bool:
+        asignacion = self._asignaciones.get(asignacion_id)
+        if asignacion is None or asignacion.club_id != club_id or not _pendiente(asignacion):
             return False
-        if not _vigente(invitacion, datetime.now(timezone.utc)):
-            return False
-        self._invitaciones[invitacion_id] = replace(invitacion, revocada_en=self._tick())
+        self._asignaciones[asignacion_id] = replace(asignacion, revocada_en=self._tick())
         return True
 
-    def accept_invitacion(
-        self, codigo_hash: str, usuario_id: UUID, nombre: str, max_admins: int
-    ) -> tuple[AcceptResult, StoredClub | None]:
-        if usuario_id in self._admins:
-            return "ya_administra", None
-        invitacion = None
-        # Every stored hash is compared in constant time.
-        for candidata in self._invitaciones.values():
-            if hmac.compare_digest(candidata.codigo_hash, codigo_hash):
-                invitacion = candidata
-        if invitacion is None or not _vigente(invitacion, datetime.now(timezone.utc)):
-            return "no_encontrada", None
-        if len(self.list_admins(invitacion.club_id)) >= max_admins:
-            return "sin_cupo", None
-        stamp = self._tick()
-        self._invitaciones[invitacion.id] = replace(invitacion, usada_por=usuario_id, usada_en=stamp)
-        self._admins[usuario_id] = StoredAdmin(
-            club_id=invitacion.club_id, usuario_id=usuario_id, rol="ADMIN", nombre=nombre,
-            agregado_por=invitacion.creada_por, fecha_alta=stamp,
-        )
-        return "aceptada", _public(self._clubs[invitacion.club_id])
+    def has_asignacion_pendiente(self, email: str) -> bool:
+        return bool(self._candidatas(email))
 
-    def set_invitacion_expira(self, invitacion_id: UUID, expira_en: datetime) -> None:
-        """Test helper: move an invitation's expiry (for example into the past)."""
-        invitacion = self._invitaciones[invitacion_id]
-        self._invitaciones[invitacion_id] = replace(invitacion, expira_en=expira_en)
+    def claim_asignacion(
+        self, email: str, usuario_id: UUID, nombre: str, max_admins: int
+    ) -> ClaimResult:
+        if usuario_id in self._admins:
+            return "ya_administra"
+        for asignacion in self._candidatas(email):
+            if len(self.list_admins(asignacion.club_id)) >= max_admins:
+                continue
+            stamp = self._tick()
+            self._asignaciones[asignacion.id] = replace(
+                asignacion, aceptada_por=usuario_id, aceptada_en=stamp
+            )
+            self._admins[usuario_id] = StoredAdmin(
+                club_id=asignacion.club_id, usuario_id=usuario_id, rol="ADMIN", nombre=nombre,
+                agregado_por=asignacion.asignada_por, fecha_alta=stamp,
+            )
+            return "aceptada"
+        return "sin_asignacion"
+
+    def _candidatas(self, email: str) -> list[StoredAsignacion]:
+        """Pending assignments of email in active clubs, oldest first."""
+        return sorted(
+            (
+                a for a in self._asignaciones.values()
+                if a.email == email and _pendiente(a) and self._clubs[a.club_id].is_active
+            ),
+            key=lambda a: (a.fecha_creacion, str(a.id)),
+        )
 
     # -- consultas deportista <-> club (HU-51) ----------------------------------------
 
@@ -334,6 +345,70 @@ class MockClubRepository:
         ultimo = max((m.id for m in self._mensajes if m.hilo_id == hilo_id), default=0)
         column = "leido_deportista_id" if de == "deportista" else "leido_club_id"
         row[column] = max(row[column], min(hasta_id, ultimo))
+
+    def mensajes_deportista(
+        self,
+        club_id: UUID,
+        deportista_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[bool, UUID | None, list[StoredMensaje]]:
+        if self.get_club(club_id) is None:
+            return False, None, []
+        hilo_id = self._hilo_id(club_id, deportista_id)
+        if hilo_id is None:
+            return True, None, []
+        mensajes = self.list_mensajes(hilo_id, after_id=after_id, before_id=before_id, limit=limit)
+        return True, hilo_id, mensajes
+
+    def mensajes_club(
+        self,
+        club_id: UUID,
+        usuario_id: UUID,
+        hilo_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[AccesoHilo, list[StoredMensaje]]:
+        acceso = self._acceso_club(club_id, usuario_id, hilo_id)
+        if acceso != "ok":
+            return acceso, []
+        return acceso, self.list_mensajes(
+            hilo_id, after_id=after_id, before_id=before_id, limit=limit
+        )
+
+    def mark_read_deportista(self, club_id: UUID, deportista_id: UUID, hasta_id: int) -> bool:
+        if self.get_club(club_id) is None:
+            return False
+        hilo_id = self._hilo_id(club_id, deportista_id)
+        if hilo_id is not None:
+            self.mark_read(hilo_id, "deportista", hasta_id)
+        return True
+
+    def mark_read_club(
+        self, club_id: UUID, usuario_id: UUID, hilo_id: UUID, hasta_id: int
+    ) -> AccesoHilo:
+        acceso = self._acceso_club(club_id, usuario_id, hilo_id)
+        if acceso == "ok":
+            self.mark_read(hilo_id, "club", hasta_id)
+        return acceso
+
+    def _hilo_id(self, club_id: UUID, deportista_id: UUID) -> UUID | None:
+        for row in self._hilos.values():
+            if row["club_id"] == club_id and row["deportista_id"] == deportista_id:
+                return row["id"]
+        return None
+
+    def _acceso_club(self, club_id: UUID, usuario_id: UUID, hilo_id: UUID) -> AccesoHilo:
+        if club_id not in self._clubs:
+            return "sin_club"
+        if self.get_admin(club_id, usuario_id) is None:
+            return "no_admin"
+        row = self._hilos.get(hilo_id)
+        return "ok" if row is not None and row["club_id"] == club_id else "sin_hilo"
 
     def _sorted_hilos(self, rows: Iterable[dict[str, Any]]) -> list[StoredHilo]:
         hilos = [self._stored_hilo(row) for row in rows]
@@ -696,12 +771,8 @@ class MockClubRepository:
         return StoredPostulacion(**values, convocatoria=convocatoria)
 
 
-def _vigente(invitacion: StoredInvitacion, now: datetime) -> bool:
-    return (
-        invitacion.usada_en is None
-        and invitacion.revocada_en is None
-        and invitacion.expira_en > now
-    )
+def _pendiente(asignacion: StoredAsignacion) -> bool:
+    return asignacion.aceptada_en is None and asignacion.revocada_en is None
 
 
 def _estado(fecha_prueba: datetime, cerrada_en: datetime | None) -> str:

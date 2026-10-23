@@ -369,3 +369,107 @@ def test_hilo_id_is_a_uuid():
     setup = Consultas()
     setup.write()
     assert UUID(setup.hilo_id())
+
+
+# -- polling with few resources (sección F) ----------------------------------------------------
+
+
+def count_repository_calls(setup: Consultas) -> list[str]:
+    """Wrap every public repository method to record which ones a request uses
+    (only the outer calls: the mock's methods call each other)."""
+    calls: list[str] = []
+    depth = [0]
+    for name in dir(setup.repository):
+        method = getattr(setup.repository, name)
+        if name.startswith("_") or not callable(method):
+            continue
+
+        def wrapper(*args, _name=name, _method=method, **kwargs):
+            if depth[0] == 0:
+                calls.append(_name)
+            depth[0] += 1
+            try:
+                return _method(*args, **kwargs)
+            finally:
+                depth[0] -= 1
+
+        setattr(setup.repository, name, wrapper)
+    return calls
+
+
+def test_polling_for_new_messages_is_one_repository_call_and_never_asks_ms_users():
+    setup = Consultas()
+    setup.write()
+    hilo_id = setup.hilo_id()
+    ultimo = setup.my_messages().json()["mensajes"][-1]["id"]
+    names_before = setup.names.calls
+    calls = count_repository_calls(setup)
+
+    athlete = setup.my_messages(after_id=ultimo)
+    assert athlete.status_code == 200
+    assert athlete.json() == {"hilo_id": hilo_id, "mensajes": []}
+    assert calls == ["mensajes_deportista"]
+
+    calls.clear()
+    club = setup.thread_messages(hilo_id, after_id=ultimo)
+    assert club.status_code == 200 and club.json() == {"hilo_id": hilo_id, "mensajes": []}
+    assert calls == ["mensajes_club"]
+
+    calls.clear()
+    read = setup.client.post(
+        f"{CLUBS_PATH}/{setup.club_id}/consultas/me/read", headers=setup.athlete_headers,
+        json={"hasta_id": ultimo},
+    )
+    assert read.status_code == 204 and calls == ["mark_read_deportista"]
+
+    calls.clear()
+    read = setup.client.post(
+        f"{CLUBS_PATH}/{setup.club_id}/consultas/{hilo_id}/read", headers=setup.principal_headers,
+        json={"hasta_id": ultimo},
+    )
+    assert read.status_code == 204 and calls == ["mark_read_club"]
+    assert setup.names.calls == names_before
+
+
+def test_new_messages_arrive_through_after_id_with_the_same_shape():
+    setup = Consultas()
+    setup.write("Primera")
+    hilo_id = setup.hilo_id()
+    primera = setup.my_messages().json()["mensajes"][-1]["id"]
+    setup.reply(hilo_id, "Respuesta")
+    athlete = setup.my_messages(after_id=primera).json()
+    assert athlete["hilo_id"] == hilo_id
+    assert [(m["de"], m["texto"], m["propio"]) for m in athlete["mensajes"]] == [("club", "Respuesta", False)]
+    club = setup.thread_messages(hilo_id, after_id=primera).json()
+    assert [(m["de"], m["propio"]) for m in club["mensajes"]] == [("club", True)]
+
+
+def test_athlete_without_a_thread_marks_read_without_error_but_unknown_club_is_404():
+    setup = Consultas()
+    ok = setup.client.post(
+        f"{CLUBS_PATH}/{setup.club_id}/consultas/me/read", headers=setup.athlete_headers,
+        json={"hasta_id": 3},
+    )
+    assert ok.status_code == 204
+    missing = setup.client.post(
+        f"{CLUBS_PATH}/{uuid4()}/consultas/me/read", headers=setup.athlete_headers, json={"hasta_id": 3}
+    )
+    assert missing.status_code == 404 and missing.json() == {"detail": "Club no encontrado."}
+
+
+def test_removed_admin_cannot_read_messages_nor_mark_them_read():
+    setup = Consultas()
+    setup.write()
+    hilo_id = setup.hilo_id()
+    setup.remove(setup.admin, setup.principal_headers)
+    assert setup.thread_messages(hilo_id, headers=setup.admin_headers).json() == {
+        "detail": "No administras este club."
+    }
+    read = setup.client.post(
+        f"{CLUBS_PATH}/{setup.club_id}/consultas/{hilo_id}/read", headers=setup.admin_headers,
+        json={"hasta_id": 1},
+    )
+    assert read.status_code == 403
+    assert setup.client.get(
+        f"{CLUBS_PATH}/{uuid4()}/consultas/{hilo_id}/messages", headers=setup.principal_headers
+    ).status_code == 404

@@ -18,9 +18,13 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
   `nombre` (copiado de Ms_Users al entrar, o `Administrador del club`),
   `agregado_por` y `fecha_alta`. La 007 la llena con los `club.usuario_id`
   actuales como `PRINCIPAL` (si una cuenta tenía varios clubes, queda el más antiguo).
-- `club_invitacion_admin` (007): códigos de un solo uso para sumar administradores.
-  Solo guarda `codigo_hash` (SHA-256, único), `creada_por`, `fecha_creacion`,
-  `expira_en` (72 h), `usada_por`/`usada_en` y `revocada_en`. Nunca se borran.
+- `club_admin_asignacion` (migración 009): correos que el `PRINCIPAL` asignó como
+  administradores. `email` en minúsculas y sin espacios (`CHECK`, hasta 254),
+  `asignada_por`, `fecha_creacion`, `aceptada_por`/`aceptada_en` (al activarse en
+  `GET /clubs/me`) y `revocada_en`. Índice único parcial `(club_id, email)` mientras está
+  pendiente e índice por `email` de las pendientes. Nunca se borran filas (se borran solo
+  con su club, `ON DELETE CASCADE`). Reemplaza a `club_invitacion_admin` (códigos de
+  invitación de la 007), que la 009 elimina.
 - `consulta_hilo` (migración 008): una conversación por club y deportista
   (`UNIQUE (club_id, deportista_id)`), con `deportista_nombre` (copia de Ms_Users al
   crearla) y el último mensaje leído por cada lado (`leido_deportista_id`,
@@ -80,7 +84,7 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 | `transaccion_pago`, `suscripcion` | SELECT, INSERT, UPDATE (nunca se borran) | 006 |
 | `clubs_api.notification_outbox` | USAGE del esquema; SELECT, INSERT, UPDATE, DELETE | 004 (el servicio inserta; el worker del gateway, con este mismo rol, lee, marca y purga) |
 | `club_administrador` | SELECT, INSERT, DELETE (quitar o salir) | 007 |
-| `club_invitacion_admin` | SELECT, INSERT, UPDATE (marcar usada o revocada; nunca se borra) | 007 |
+| `club_admin_asignacion` | SELECT, INSERT, UPDATE (marcar aceptada o revocada; nunca se borra) | 009 |
 | `consulta_hilo` | SELECT, INSERT, UPDATE (marcas de leído) | 008 |
 | `consulta_mensaje` | SELECT, INSERT (la columna identity no requiere permisos sobre secuencias) | 008 |
 
@@ -110,12 +114,15 @@ En pgAdmin, conectado a `sportmatch_clubs` como `postgres`, una vez y en orden:
 7. `db/migrations/006_pagos.sql`: planes, transacciones de pago y suscripciones. Mismas
    garantías. Después, solo en desarrollo, `db/seeds/demo_planes.sql` (como `postgres`)
    para tener dos planes de prueba.
-8. `db/migrations/007_club_rut_administradores.sql`: `club.rut`, `club_administrador`
-   (con los dueños actuales como `PRINCIPAL`) y `club_invitacion_admin`. Mismas
-   garantías. Sin ella fallan todas las rutas de administración (la autorización lee
-   `club_administrador`).
+8. `db/migrations/007_club_rut_administradores.sql`: `club.rut` y `club_administrador`
+   (con los dueños actuales como `PRINCIPAL`). Mismas garantías. Ya no crea
+   `club_invitacion_admin`. Sin ella fallan todas las rutas de administración (la
+   autorización lee `club_administrador`).
 9. `db/migrations/008_consultas_club.sql`: `consulta_hilo` y `consulta_mensaje`. Mismas
    garantías; requiere la 007 y el outbox de la 004.
+10. `db/migrations/009_admin_por_correo.sql`: crea `club_admin_asignacion` y elimina
+   `club_invitacion_admin` (las invitaciones pendientes se pierden: hay que asignar los
+   correos). Mismas garantías; requiere la 007.
 
 `python -m app.database.migrate` aplica las migraciones con el usuario de `DB_*`;
 con el rol del servicio solo sirve para comprobar que ya están aplicadas.

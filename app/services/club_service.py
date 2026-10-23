@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 
+from app.core.config import CLUB_MAX_ADMINS_DEFAULT
 from app.core.security import Actor
 from app.repositories.base import ClubRepository, ClubSport, StoredClub
 from app.schemas.club import (
@@ -27,10 +28,16 @@ from app.services.users_client import ADMIN_NAME_FALLBACK, AccountNames, account
 
 
 class ClubService:
-    def __init__(self, repository: ClubRepository, names: AccountNames | None = None) -> None:
+    def __init__(
+        self,
+        repository: ClubRepository,
+        names: AccountNames | None = None,
+        max_admins: int = CLUB_MAX_ADMINS_DEFAULT,
+    ) -> None:
         self._repository = repository
-        # Ms_Users, for the creator's name in club_administrador; optional.
+        # Ms_Users, for the administrator's name in club_administrador; optional.
         self._names = names
+        self._max_admins = max_admins
 
     # -- public directory (HU-30) ---------------------------------------------
 
@@ -61,10 +68,29 @@ class ClubService:
 
     def my_club(self, actor: Actor) -> ClubMio:
         club = self._repository.get_club_by_admin(actor.id)
+        if club is None and self._claim_asignacion(actor):
+            club = self._repository.get_club_by_admin(actor.id)
         admin = self._repository.get_admin(club.id, actor.id) if club is not None else None
         if club is None or admin is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aún no tienes un club.")
         return ClubMio(**_managed(club).model_dump(), mi_rol=admin.rol)
+
+    def _claim_asignacion(self, actor: Actor) -> bool:
+        """Activate the oldest pending assignment of the actor's email (sección E).
+
+        Only a club_admin account whose token carries its verified email; an
+        athlete with that email never activates it. Ms_Users is asked for the
+        name only when there is something to activate, not on every /me.
+        """
+        if not actor.is_club_admin or actor.email is None:
+            return False
+        if not self._repository.has_asignacion_pendiente(actor.email):
+            return False
+        nombre = account_name(self._names, actor, ADMIN_NAME_FALLBACK)
+        result = self._repository.claim_asignacion(
+            actor.email, actor.id, nombre, self._max_admins
+        )
+        return result == "aceptada"
 
     def create_club(self, actor: Actor, payload: ClubCreate) -> ClubManaged:
         if not actor.is_club_admin:

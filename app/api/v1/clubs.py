@@ -70,7 +70,9 @@ def list_sports(service: ClubService = Depends(get_club_service)) -> list[Deport
     "/me",
     response_model=ClubMio,
     summary="El club que administro (panel de edición)",
-    description="Incluye mi_rol: PRINCIPAL o ADMIN.",
+    description="Incluye mi_rol: PRINCIPAL o ADMIN. Si la cuenta aún no administra un club "
+    "y su correo verificado tiene una asignación pendiente, la activa y entra como ADMIN. "
+    "404 si no administra ninguno.",
 )
 def my_club(
     actor: Actor = Depends(get_club_admin),

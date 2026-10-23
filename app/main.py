@@ -127,8 +127,8 @@ def create_app(
         return {"status": "ready", "service": "ms_club"}
 
     # Convocatorias, postulaciones, comunicados, consultas and administradores first:
-    # their fixed paths (/announcements, /notices/me, /consultas/me,
-    # /admins/invitations/accept) must not be read as the {club_id} of the clubs routes.
+    # their fixed paths (/announcements, /notices/me, /consultas/me) must not be
+    # read as the {club_id} of the clubs routes.
     app.include_router(postulaciones_router)
     app.include_router(comunicados_router)
     app.include_router(consultas_router)

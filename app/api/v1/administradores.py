@@ -6,34 +6,14 @@ from fastapi import APIRouter, Depends, Response, status
 
 from app.api.dependencies import get_administrador_service, get_club_admin
 from app.core.security import Actor
-from app.schemas.administrador import (
-    AdminRead,
-    InvitacionAceptar,
-    InvitacionCreada,
-    InvitacionRead,
-)
-from app.schemas.club import ClubManaged
+from app.schemas.administrador import AdminRead, AsignacionCreate, AsignacionRead
 from app.services.administrador_service import AdministradorService
 
-# Several administrators per club (sprint clubes y chats, sección A). Every route
-# requires a club_admin token; the service checks the account administers the club.
-# The fixed path /admins/invitations/accept is registered before the club routes.
+# Several administrators per club (sprint clubes y chats, secciones A y E). Every
+# route requires a club_admin token; the service checks the account administers
+# the club and, to assign or revoke, that it is its PRINCIPAL. An assigned email
+# becomes an ADMIN on GET /clubs/me (see ClubService.my_club).
 router = APIRouter(prefix="/api/v1/clubs", tags=["administradores"])
-
-
-@router.post(
-    "/admins/invitations/accept",
-    response_model=ClubManaged,
-    summary="Unirme a un club con un código de invitación",
-    description="Solo una cuenta club_admin que aún no administra un club. 404 con el mismo "
-    "mensaje si el código no existe, venció, ya se usó o fue revocado.",
-)
-def accept_invitation(
-    payload: InvitacionAceptar,
-    actor: Actor = Depends(get_club_admin),
-    service: AdministradorService = Depends(get_administrador_service),
-) -> ClubManaged:
-    return service.accept_invitacion(actor, payload.codigo)
 
 
 @router.get(
@@ -49,49 +29,53 @@ def list_admins(
     return service.list_admins(actor, club_id)
 
 
-@router.post(
-    "/{club_id}/admins/invitations",
-    response_model=InvitacionCreada,
-    status_code=status.HTTP_201_CREATED,
-    summary="Invitar a un administrador",
-    description="Genera un código de un solo uso que vence en 72 horas. El código solo se "
-    "muestra en esta respuesta. 409 si el club llegó al máximo de administradores, contando "
-    "las invitaciones vigentes.",
-)
-def create_invitation(
-    club_id: UUID,
-    actor: Actor = Depends(get_club_admin),
-    service: AdministradorService = Depends(get_administrador_service),
-) -> InvitacionCreada:
-    return service.create_invitacion(actor, club_id)
-
-
 @router.get(
-    "/{club_id}/admins/invitations",
-    response_model=list[InvitacionRead],
-    summary="Invitaciones vigentes del club (sin el código)",
+    "/{club_id}/admins/assignments",
+    response_model=list[AsignacionRead],
+    summary="Correos asignados pendientes",
+    description="Asignaciones que aún nadie activó, la más reciente primero.",
 )
-def list_invitations(
+def list_assignments(
     club_id: UUID,
     actor: Actor = Depends(get_club_admin),
     service: AdministradorService = Depends(get_administrador_service),
-) -> list[InvitacionRead]:
-    return service.list_invitaciones(actor, club_id)
+) -> list[AsignacionRead]:
+    return service.list_asignaciones(actor, club_id)
+
+
+@router.post(
+    "/{club_id}/admins/assignments",
+    response_model=AsignacionRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Asignar un correo como administrador",
+    description="Solo el administrador principal. La asignación queda pendiente hasta que una "
+    "cuenta de club con ese correo verificado entra a la app; la respuesta nunca indica si "
+    "esa cuenta existe. 409 si el correo ya está pendiente en este club, es el propio o no "
+    "queda cupo (administradores más asignaciones pendientes).",
+)
+def create_assignment(
+    club_id: UUID,
+    payload: AsignacionCreate,
+    actor: Actor = Depends(get_club_admin),
+    service: AdministradorService = Depends(get_administrador_service),
+) -> AsignacionRead:
+    return service.create_asignacion(actor, club_id, payload.email)
 
 
 @router.delete(
-    "/{club_id}/admins/invitations/{invitacion_id}",
+    "/{club_id}/admins/assignments/{asignacion_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     response_class=Response,
-    summary="Revocar una invitación vigente",
+    summary="Revocar una asignación pendiente",
+    description="Solo el administrador principal. 404 si no existe o ya no está pendiente.",
 )
-def revoke_invitation(
+def revoke_assignment(
     club_id: UUID,
-    invitacion_id: UUID,
+    asignacion_id: UUID,
     actor: Actor = Depends(get_club_admin),
     service: AdministradorService = Depends(get_administrador_service),
 ) -> Response:
-    service.revoke_invitacion(actor, club_id, invitacion_id)
+    service.revoke_asignacion(actor, club_id, asignacion_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
