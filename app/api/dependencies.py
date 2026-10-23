@@ -3,15 +3,17 @@ from __future__ import annotations
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from app.core.config import WebpaySettings
+from app.core.config import WebpaySettings, get_club_max_admins
 from app.core.security import Actor, authenticate
 from app.repositories.base import ClubRepository
+from app.services.administrador_service import AdministradorService
 from app.services.club_service import ClubService
 from app.services.comunicado_service import ComunicadoService
+from app.services.consulta_service import ConsultaService
 from app.services.convocatoria_service import ConvocatoriaService
 from app.services.pago_service import PagoService
 from app.services.postulacion_service import PostulacionService
-from app.services.users_client import AthleteProfiles
+from app.services.users_client import AccountNames, AthleteProfiles
 from app.services.webpay import MockWebpay, WebpayGateway
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -21,8 +23,32 @@ def get_repository(request: Request) -> ClubRepository:
     return request.app.state.repository
 
 
-def get_club_service(repository: ClubRepository = Depends(get_repository)) -> ClubService:
-    return ClubService(repository)
+def get_account_names(request: Request) -> AccountNames | None:
+    """Ms_Users for display names. Optional: without it (or if it fails) a
+    neutral name is used, so it never blocks a request."""
+    users = getattr(request.app.state, "users", None)
+    return users if callable(getattr(users, "display_name", None)) else None
+
+
+def get_club_service(
+    repository: ClubRepository = Depends(get_repository),
+    names: AccountNames | None = Depends(get_account_names),
+) -> ClubService:
+    return ClubService(repository, names)
+
+
+def get_administrador_service(
+    repository: ClubRepository = Depends(get_repository),
+    names: AccountNames | None = Depends(get_account_names),
+) -> AdministradorService:
+    return AdministradorService(repository, names, get_club_max_admins())
+
+
+def get_consulta_service(
+    repository: ClubRepository = Depends(get_repository),
+    names: AccountNames | None = Depends(get_account_names),
+) -> ConsultaService:
+    return ConsultaService(repository, names)
 
 
 def get_convocatoria_service(
@@ -108,5 +134,15 @@ def get_athlete(actor: Actor = Depends(get_current_actor)) -> Actor:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Solo los deportistas pueden postular a convocatorias.",
+        )
+    return actor
+
+
+def get_consulta_athlete(actor: Actor = Depends(get_current_actor)) -> Actor:
+    """Guard of the athlete's consulta routes: a valid token with an athlete role."""
+    if not actor.is_athlete:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los deportistas pueden escribir consultas a un club.",
         )
     return actor

@@ -145,7 +145,7 @@ class PagoService:
 
     def my_suscripcion(self, actor: Actor) -> SuscripcionRead:
         if actor.is_club_admin:
-            club = self._repository.get_club_by_owner(actor.id)
+            club = self._repository.get_club_by_admin(actor.id)
             if club is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aún no tienes un club.")
             suscripcion = self._repository.get_suscripcion(club_id=club.id)
@@ -164,7 +164,7 @@ class PagoService:
 
     def _comprador(self, actor: Actor, plan: StoredPlan) -> tuple[UUID | None, UUID | None]:
         """(usuario_id, club_id) of whoever is paying, from the access token:
-        a club plan is paid for the representative's own club, a user plan for
+        a club plan is paid for the club the representative administers, a user plan for
         the athlete themselves."""
         if plan.tipo == "CLUB":
             if not actor.is_club_admin:
@@ -172,7 +172,7 @@ class PagoService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Este plan es para representantes de club.",
                 )
-            club = self._repository.get_club_by_owner(actor.id)
+            club = self._repository.get_club_by_admin(actor.id)
             if club is None:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,

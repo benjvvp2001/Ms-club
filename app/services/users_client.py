@@ -16,6 +16,31 @@ class AthleteProfiles(Protocol):
     def athlete_profile(self, actor: Actor) -> PerfilDeportivo: ...
 
 
+class AccountNames(Protocol):
+    """Source of an account's display name (Ms_Users). None when unknown."""
+
+    def display_name(self, actor: Actor) -> str | None: ...
+
+
+# Shown when Ms_Users cannot give the name: the name is a convenience and never
+# blocks creating a club, joining one or writing to a club.
+ADMIN_NAME_FALLBACK = "Administrador del club"
+ATHLETE_NAME_FALLBACK = "Deportista"
+NAME_MAX_LENGTH = 100
+
+
+def account_name(names: AccountNames | None, actor: Actor, fallback: str) -> str:
+    """The actor's name for a snapshot (club_administrador, consulta_hilo)."""
+    if names is None:
+        return fallback
+    try:
+        name = names.display_name(actor)
+    except Exception:  # noqa: BLE001 - any failure of Ms_Users falls back, never blocks
+        return fallback
+    name = " ".join((name or "").split())[:NAME_MAX_LENGTH].strip()
+    return name or fallback
+
+
 class UsersClient:
     """HTTP access to the athlete's own public card in Ms_Users, with their token.
 
@@ -53,6 +78,24 @@ class UsersClient:
             )
         except (ValueError, AttributeError, ValidationError) as error:
             raise _unavailable() from error
+
+    def display_name(self, actor: Actor) -> str | None:
+        """"Nombre Apellido" from the account's own profile, read with its token
+        (GET /api/v1/users/{id}/profile). None on any error."""
+        try:
+            response = self._client.get(
+                f"/api/v1/users/{actor.id}/profile",
+                headers={"Authorization": f"Bearer {actor.token}"},
+            )
+            if response.status_code != status.HTTP_200_OK:
+                return None
+            profile = response.json()
+            nombre = profile.get("nombre")
+            apellido = profile.get("apellido_paterno")
+        except (httpx.RequestError, ValueError, AttributeError):
+            return None
+        parts = [part for part in (nombre, apellido) if isinstance(part, str) and part.strip()]
+        return " ".join(parts) or None
 
 
 def _unavailable() -> HTTPException:

@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from test_club_admin import token  # also sets JWT_SECRET before the app is imported
+from test_club_admin import nuevo_rut, token  # also sets JWT_SECRET before the app is imported
 
 from app.core.config import WebpaySettings
 from app.main import create_app
@@ -50,7 +50,7 @@ class Pagos:
         headers = token(owner)
         club_id = None
         if with_club:
-            response = self.client.post(CLUBS_PATH, headers=headers, json={"nombre": "Club Ñuñoa"})
+            response = self.client.post(CLUBS_PATH, headers=headers, json={"nombre": "Club Ñuñoa", "rut": nuevo_rut()})
             assert response.status_code == 201, response.text
             club_id = UUID(response.json()["id"])
         return owner, headers, club_id

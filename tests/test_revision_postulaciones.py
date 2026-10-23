@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from test_club_admin import token  # also sets JWT_SECRET before the app is imported
+from test_club_admin import nuevo_rut, token  # also sets JWT_SECRET before the app is imported
 from test_postulaciones import CALLS_PATH, Setup
 
 REVIEW_PATH = "/api/v1/clubs/announcements/applications"
@@ -250,7 +250,7 @@ def test_only_the_owning_club_lists_and_reviews(who, detail):
         headers = token(uuid4(), "admin")
     else:
         headers = token(uuid4())
-        assert setup.client.post("/api/v1/clubs", headers=headers, json={"nombre": "Otro club"}).status_code == 201
+        assert setup.client.post("/api/v1/clubs", headers=headers, json={"nombre": "Otro club", "rut": nuevo_rut()}).status_code == 201
     listed = setup.candidates(headers)
     reviewed = setup.review(postulacion["id"], {"estado": "ACEPTADO"}, headers)
     assert (listed.status_code, reviewed.status_code) == (403, 403)

@@ -72,8 +72,8 @@ class PostulacionService:
         return to_postulacion_read(postulacion)
 
     # -- revisión por el club (HU-34) ---------------------------------------------------
-    # Only the representative of the club that owns the convocatoria; the club
-    # may be inactive (the owner still manages it) and the tryout may be over
+    # Only an administrator of the club that owns the convocatoria; the club
+    # may be inactive (its administrators still manage it) and the tryout may be over
     # (selections are confirmed after it).
 
     def list_candidatos(

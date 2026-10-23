@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import os
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 from app.repositories.base import ClubSport, StoredClub
 from app.repositories.mock_club_repository import MockClubRepository
+from app.services.rut import digito_verificador
 
 CLUBS_PATH = "/api/v1/clubs"
 FUTBOL = ClubSport(1, "Fútbol")
@@ -32,13 +34,24 @@ def token(user_id: UUID, role: str = "club_admin", **overrides: object) -> dict[
     return {"Authorization": f"Bearer {encoded}"}
 
 
+_RUT_BODIES = itertools.count(76_000_000)
+
+
+def nuevo_rut() -> str:
+    """A valid RUT of a legal person, different on every call."""
+    cuerpo = next(_RUT_BODIES)
+    return f"{cuerpo}-{digito_verificador(cuerpo)}"
+
+
 def make_client() -> tuple[TestClient, MockClubRepository]:
     repository = MockClubRepository(sports=[FUTBOL, TENIS, CURLING_INACTIVO])
     return TestClient(create_app(repository=repository)), repository
 
 
 def created_club(client: TestClient, owner: UUID, **fields: object) -> dict:
-    response = client.post(CLUBS_PATH, headers=token(owner), json={"nombre": "Club Ñuñoa", **fields})
+    response = client.post(
+        CLUBS_PATH, headers=token(owner), json={"nombre": "Club Ñuñoa", "rut": nuevo_rut(), **fields}
+    )
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -51,6 +64,7 @@ def test_representative_creates_their_club_with_full_profile():
     owner = uuid4()
     body = {
         "nombre": "Club Deportivo Ñuñoa",
+        "rut": "76.123.456-0",
         "descripcion": "Fútbol y tenis para todas las edades.",
         "historia": "Fundado en 1965 por vecinos del barrio.",
         "direccion": "Av. Grecia 2001",
@@ -73,12 +87,15 @@ def test_representative_creates_their_club_with_full_profile():
     assert club["redes_sociales"] == {"instagram": "https://instagram.com/cdnunoa"}
     assert club["estado_verificacion"] == "pendiente" and club["verificado"] is False
     assert club["is_active"] is True and club["deportes"] == []
+    assert club["rut"] == "76123456-0"  # stored without dots
     assert "usuario_id" not in club
 
     mine = client.get(f"{CLUBS_PATH}/me", headers=token(owner))
     assert mine.status_code == 200 and mine.json()["id"] == club["id"]
+    assert mine.json()["mi_rol"] == "PRINCIPAL"
     public = client.get(f"{CLUBS_PATH}/{club['id']}").json()
     assert public["historia"] == "Fundado en 1965 por vecinos del barrio."
+    assert public["rut"] == "76123456-0"
     assert "estado_verificacion" not in public
 
 
@@ -86,7 +103,7 @@ def test_a_representative_manages_a_single_club():
     client, _ = make_client()
     owner = uuid4()
     created_club(client, owner)
-    second = client.post(CLUBS_PATH, headers=token(owner), json={"nombre": "Otro club"})
+    second = client.post(CLUBS_PATH, headers=token(owner), json={"nombre": "Otro club", "rut": nuevo_rut()})
     assert second.status_code == 409
     assert second.json() == {"detail": "Ya administras un club."}
 
@@ -94,7 +111,9 @@ def test_a_representative_manages_a_single_club():
 @pytest.mark.parametrize("role", ["player", "usuario", "admin"])
 def test_only_club_representatives_create_clubs(role):
     client, _ = make_client()
-    response = client.post(CLUBS_PATH, headers=token(uuid4(), role), json={"nombre": "Mi club"})
+    response = client.post(
+        CLUBS_PATH, headers=token(uuid4(), role), json={"nombre": "Mi club", "rut": nuevo_rut()}
+    )
     assert response.status_code == 403
 
 
@@ -117,6 +136,8 @@ def test_only_club_representatives_create_clubs(role):
 )
 def test_invalid_club_data_is_rejected_with_400(body):
     client, _ = make_client()
+    if body:
+        body = {**body, "rut": nuevo_rut()}  # so only the field under test is wrong
     assert client.post(CLUBS_PATH, headers=token(uuid4()), json=body).status_code == 400
 
 
@@ -336,7 +357,9 @@ def test_invalid_offered_sports_are_rejected_with_400(deporte_ids):
 def test_invalid_sports_on_creation_create_nothing():
     client, _ = make_client()
     owner = uuid4()
-    response = client.post(CLUBS_PATH, headers=token(owner), json={"nombre": "Club", "deporte_ids": [99]})
+    response = client.post(
+        CLUBS_PATH, headers=token(owner), json={"nombre": "Club", "rut": nuevo_rut(), "deporte_ids": [99]}
+    )
     assert response.status_code == 400
     assert client.get(f"{CLUBS_PATH}/me", headers=token(owner)).status_code == 404
 
@@ -391,7 +414,7 @@ def test_an_infinite_number_is_a_400_not_a_server_error(field):
     """1e999 arrives as infinity and used to make the error response itself fail (500)."""
     client, _ = make_client()
     coordinates = {"latitud": 0, "longitud": 0, field: "__INF__"}
-    body = '{"nombre": "Club", "latitud": %s, "longitud": %s}' % (
+    body = '{"nombre": "Club", "rut": "%s", "latitud": %s, "longitud": %s}' % (nuevo_rut(),
         "1e999" if field == "latitud" else "0", "1e999" if field == "longitud" else "0")
     response = client.post(CLUBS_PATH, headers={**token(uuid4()), "Content-Type": "application/json"}, content=body)
     assert response.status_code == 400

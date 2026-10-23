@@ -11,6 +11,7 @@ from app.schemas.club import (
     ClubCreate,
     ClubFilters,
     ClubManaged,
+    ClubMio,
     ClubPage,
     ClubProfile,
     ClubSummary,
@@ -21,11 +22,15 @@ from app.schemas.common import PAGE_SIZE_MAX, Deporte
 from app.schemas.convocatoria import ConvocatoriaFilters, ConvocatoriaRead
 from app.services.authorization import club_not_found, require_managed_club
 from app.services.convocatoria_service import to_convocatoria_read
+from app.services.rut import normalizar_rut
+from app.services.users_client import ADMIN_NAME_FALLBACK, AccountNames, account_name
 
 
 class ClubService:
-    def __init__(self, repository: ClubRepository) -> None:
+    def __init__(self, repository: ClubRepository, names: AccountNames | None = None) -> None:
         self._repository = repository
+        # Ms_Users, for the creator's name in club_administrador; optional.
+        self._names = names
 
     # -- public directory (HU-30) ---------------------------------------------
 
@@ -51,14 +56,15 @@ class ClubService:
 
     # -- club administration (HU-31) ------------------------------------------
     #
-    # Exclusive edition panel: only a representative (club_admin) and only on
-    # the club whose usuario_id is theirs (require_managed_club).
+    # Edition panel: only a representative (club_admin) and only on the club
+    # they administer (club_administrador, require_managed_club).
 
-    def my_club(self, actor: Actor) -> ClubManaged:
-        club = self._repository.get_club_by_owner(actor.id)
-        if club is None:
+    def my_club(self, actor: Actor) -> ClubMio:
+        club = self._repository.get_club_by_admin(actor.id)
+        admin = self._repository.get_admin(club.id, actor.id) if club is not None else None
+        if club is None or admin is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aún no tienes un club.")
-        return _managed(club)
+        return ClubMio(**_managed(club).model_dump(), mi_rol=admin.rol)
 
     def create_club(self, actor: Actor, payload: ClubCreate) -> ClubManaged:
         if not actor.is_club_admin:
@@ -66,10 +72,28 @@ class ClubService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Solo un representante de club puede crear un club.",
             )
+        rut = normalizar_rut(payload.rut)
+        if rut is None:
+            raise HTTPException(
+                status_code=422,  # the contract asks 422 (other input errors here are 400)
+                detail="RUT inválido: usa el RUT del club (persona jurídica), por ejemplo 76123456-0.",
+            )
         self._check_sports(payload.deporte_ids)
-        club = self._repository.create_club(actor.id, payload.insert_values(), payload.deporte_ids)
-        if club is None:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya administras un club.")
+        if self._repository.get_club_by_admin(actor.id) is not None:
+            raise _already_admin()
+        # The name never blocks the creation: Ms_Users failing gives a neutral one.
+        nombre = account_name(self._names, actor, ADMIN_NAME_FALLBACK)
+        result, club = self._repository.create_club(
+            actor.id, rut, nombre, payload.insert_values(), payload.deporte_ids
+        )
+        if result == "ya_administra":
+            raise _already_admin()
+        if result == "rut_duplicado":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Ya existe un club con ese RUT.",
+            )
+        assert club is not None
         return _managed(club)
 
     def update_club(self, actor: Actor, club_id: UUID, payload: ClubUpdate) -> ClubManaged:
@@ -123,6 +147,10 @@ class ClubService:
         return [to_convocatoria_read(c) for c in convocatorias]
 
 
+def _already_admin() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya administras un club.")
+
+
 def _deportes(deportes: list[ClubSport]) -> list[Deporte]:
     return [Deporte(id=d.id, nombre=d.nombre, descripcion=d.descripcion) for d in deportes]
 
@@ -153,6 +181,7 @@ def _public_data(club: StoredClub) -> dict:
     return {
         "id": club.id,
         "nombre": club.nombre,
+        "rut": club.rut,
         "descripcion": club.descripcion,
         "historia": club.historia,
         "logo": club.logo,
@@ -171,6 +200,10 @@ def _public_data(club: StoredClub) -> dict:
         "verificado": club.estado_verificacion == "verificado",
         "deportes": _deportes(club.deportes),
     }
+
+
+def to_managed(club: StoredClub) -> ClubManaged:
+    return _managed(club)
 
 
 def _managed(club: StoredClub) -> ClubManaged:
