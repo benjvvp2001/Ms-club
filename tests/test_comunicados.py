@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from test_club_admin import token  # also sets JWT_SECRET before the app is imported
+from test_club_admin import nuevo_rut, token  # also sets JWT_SECRET before the app is imported
 from test_postulaciones import CLUBS_PATH
 from test_revision_postulaciones import Review
 
@@ -187,7 +187,7 @@ def test_only_the_owning_representative_publishes_and_lists(who, detail):
         headers = token(uuid4(), "admin")
     else:
         headers = token(uuid4())
-        assert setup.client.post(CLUBS_PATH, headers=headers, json={"nombre": "Otro club"}).status_code == 201
+        assert setup.client.post(CLUBS_PATH, headers=headers, json={"nombre": "Otro club", "rut": nuevo_rut()}).status_code == 201
     published = setup.publish_notice(headers)
     listed = setup.client.get(f"{CLUBS_PATH}/{setup.club_id}/notices", headers=headers)
     assert (published.status_code, listed.status_code) == (403, 403)

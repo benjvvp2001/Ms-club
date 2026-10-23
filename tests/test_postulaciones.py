@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from test_club_admin import token  # also sets JWT_SECRET before the app is imported
+from test_club_admin import nuevo_rut, token  # also sets JWT_SECRET before the app is imported
 
 from app.core.security import Actor
 from app.main import create_app
@@ -53,7 +53,7 @@ class Setup:
         self.client = TestClient(create_app(repository=self.repository, users=self.users))
         self.owner_headers = token(uuid4())
         response = self.client.post(
-            CLUBS_PATH, headers=self.owner_headers, json={"nombre": "Club Ñuñoa", "deporte_ids": [1]}
+            CLUBS_PATH, headers=self.owner_headers, json={"nombre": "Club Ñuñoa", "rut": nuevo_rut(), "deporte_ids": [1]},
         )
         assert response.status_code == 201, response.text
         self.club_id = UUID(response.json()["id"])

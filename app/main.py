@@ -10,13 +10,16 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.api.v1.administradores import router as administradores_router
 from app.api.v1.clubs import router as clubs_router
 from app.api.v1.comunicados import router as comunicados_router
+from app.api.v1.consultas import router as consultas_router
 from app.api.v1.convocatorias import router as convocatorias_router
 from app.api.v1.pagos import router as pagos_router
 from app.api.v1.postulaciones import router as postulaciones_router
 from app.core.config import (
     WebpaySettings,
+    get_club_max_admins,
     get_database_settings,
     get_settings,
     get_users_service_settings,
@@ -57,6 +60,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        get_club_max_admins()  # a wrong CLUB_MAX_ADMINS stops the start, not a request
         if owns_pool:
             get_settings()
             settings = get_database_settings()
@@ -122,10 +126,13 @@ def create_app(
                 raise HTTPException(status_code=503, detail="clubs database unavailable") from error
         return {"status": "ready", "service": "ms_club"}
 
-    # Convocatorias, postulaciones and comunicados first: their fixed paths
-    # (/announcements, /notices/me) must not be read as the {club_id} of the clubs routes.
+    # Convocatorias, postulaciones, comunicados, consultas and administradores first:
+    # their fixed paths (/announcements, /notices/me, /consultas/me,
+    # /admins/invitations/accept) must not be read as the {club_id} of the clubs routes.
     app.include_router(postulaciones_router)
     app.include_router(comunicados_router)
+    app.include_router(consultas_router)
+    app.include_router(administradores_router)
     app.include_router(pagos_router)
     app.include_router(convocatorias_router)
     app.include_router(clubs_router)

@@ -18,7 +18,7 @@ from app.schemas.comunicado import (
 from app.services.comunicado_service import ComunicadoService
 
 # Notices from clubs (HU-38). Publishing and listing a club's notices require
-# the club_admin who owns the club; the feed is for athletes (player/usuario).
+# an administrator of the club (club_admin); the feed is for athletes (player/usuario).
 # "/announcements" already belongs to the convocatorias (HU-32), so notices live
 # under "/notices".
 router = APIRouter(prefix="/api/v1/clubs", tags=["comunicados"])
@@ -44,7 +44,7 @@ def my_feed(
     response_model=ComunicadoClubRead,
     status_code=status.HTTP_201_CREATED,
     summary="Publicar un comunicado del club",
-    description="Solo el representante dueño del club. Audiencia: POSTULANTES (postulaciones "
+    description="Solo un administrador del club. Audiencia: POSTULANTES (postulaciones "
     "PENDIENTE o PRESELECCIONADO), MIEMBROS (ACEPTADO) o TODOS (ambos grupos). Cada destinatario "
     "recibe una notificación en su bandeja; la respuesta indica a cuántos llegó.",
 )
@@ -61,7 +61,7 @@ def publish_comunicado(
     "/{club_id}/notices",
     response_model=ComunicadoClubPage,
     summary="Comunicados publicados por el club",
-    description="Solo el representante dueño del club. Filtros opcionales: audiencia y prioridad.",
+    description="Solo un administrador del club. Filtros opcionales: audiencia y prioridad.",
 )
 def club_comunicados(
     club_id: UUID,

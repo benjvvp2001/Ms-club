@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import EmailStr, Field, field_validator, model_validator
@@ -87,6 +87,9 @@ class _ClubFields(APIModel):
 
 class ClubCreate(_ClubFields):
     nombre: str = Field(min_length=2, max_length=100)
+    # RUT of the club as a legal person. Its format and check digit are
+    # validated by ClubService (422, as the contract asks), not here (400).
+    rut: str = Field(min_length=1, max_length=20)
 
     @model_validator(mode="after")
     def coordenadas_completas(self) -> ClubCreate:
@@ -96,7 +99,7 @@ class ClubCreate(_ClubFields):
 
     def insert_values(self) -> dict[str, Any]:
         """Column values to insert; fields left out keep the table defaults."""
-        data = self.model_dump(exclude_none=True, exclude={"deporte_ids"})
+        data = self.model_dump(exclude_none=True, exclude={"deporte_ids", "rut"})
         if self.redes_sociales is not None:
             data["redes_sociales"] = self.redes_sociales.model_dump(exclude_none=True)
         return data
@@ -159,10 +162,12 @@ class ClubPage(APIModel):
 
 
 class _ClubPublicData(APIModel):
-    """The managing account (club.usuario_id) is never exposed."""
+    """The managing accounts (club.usuario_id, club_administrador) are never
+    exposed here. The RUT is public tax data; old clubs may have none."""
 
     id: UUID
     nombre: str
+    rut: str | None
     descripcion: str | None
     historia: str | None
     logo: str | None
@@ -183,9 +188,18 @@ class ClubProfile(_ClubPublicData):
 
 
 class ClubManaged(_ClubPublicData):
-    """What the club's representative sees and edits."""
+    """What the club's administrators see and edit."""
 
     is_active: bool
     estado_verificacion: str
     fecha_creacion: datetime | None
     fecha_actualizacion: datetime | None
+
+
+RolAdmin = Literal["PRINCIPAL", "ADMIN"]
+
+
+class ClubMio(ClubManaged):
+    """GET /clubs/me: the club plus the account's role in it."""
+
+    mi_rol: RolAdmin

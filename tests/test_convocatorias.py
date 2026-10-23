@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi.testclient import TestClient
 
-from test_club_admin import token  # also sets JWT_SECRET before the app is imported
+from test_club_admin import nuevo_rut, token  # also sets JWT_SECRET before the app is imported
 
 from app.main import create_app
 from app.repositories.base import ClubSport
@@ -32,7 +32,7 @@ class Setup:
         owner = uuid4()
         headers = token(owner)
         response = self.client.post(
-            CLUBS_PATH, headers=headers, json={"nombre": nombre, "deporte_ids": list(deporte_ids)}
+            CLUBS_PATH, headers=headers, json={"nombre": nombre, "rut": nuevo_rut(), "deporte_ids": list(deporte_ids)},
         )
         assert response.status_code == 201, response.text
         return UUID(response.json()["id"]), headers

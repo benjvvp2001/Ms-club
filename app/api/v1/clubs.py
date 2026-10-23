@@ -11,6 +11,7 @@ from app.schemas.club import (
     ClubCreate,
     ClubFilters,
     ClubManaged,
+    ClubMio,
     ClubPage,
     ClubProfile,
     ClubUpdate,
@@ -20,7 +21,8 @@ from app.services.club_service import ClubService
 
 # Reading the directory is public (HU-30): athletes and visitors browse it
 # without an account. Managing a club (HU-31) requires a Ms_Users access token
-# with the club_admin role (get_club_admin), and only on the club the account owns.
+# with the club_admin role (get_club_admin), and only on the club the account
+# administers (club_administrador).
 router = APIRouter(prefix="/api/v1/clubs", tags=["clubs"])
 
 DeporteId = Annotated[int, Path(ge=1)]
@@ -46,7 +48,9 @@ def list_clubs(
     response_model=ClubManaged,
     status_code=status.HTTP_201_CREATED,
     summary="Crear el perfil de mi club",
-    description="Solo representantes de club (rol club_admin). Cada representante administra un club.",
+    description="Solo representantes de club (rol club_admin) que aún no administran uno. "
+    "Exige el RUT del club (persona jurídica): 422 si es inválido, 409 si ya existe. "
+    "Quien lo crea queda como administrador PRINCIPAL.",
 )
 def create_club(
     payload: ClubCreate,
@@ -62,11 +66,16 @@ def list_sports(service: ClubService = Depends(get_club_service)) -> list[Deport
     return service.list_sports()
 
 
-@router.get("/me", response_model=ClubManaged, summary="El club que administro (panel de edición)")
+@router.get(
+    "/me",
+    response_model=ClubMio,
+    summary="El club que administro (panel de edición)",
+    description="Incluye mi_rol: PRINCIPAL o ADMIN.",
+)
 def my_club(
     actor: Actor = Depends(get_club_admin),
     service: ClubService = Depends(get_club_service),
-) -> ClubManaged:
+) -> ClubMio:
     return service.my_club(actor)
 
 
@@ -87,7 +96,7 @@ def club_profile(
     "/{club_id}",
     response_model=ClubManaged,
     summary="Editar el perfil del club",
-    description="Solo el representante dueño del club. Cambian solo los campos enviados; "
+    description="Solo un administrador del club. Cambian solo los campos enviados; "
     "null borra un campo opcional; redes_sociales y deporte_ids se reemplazan completos.",
 )
 def update_club(

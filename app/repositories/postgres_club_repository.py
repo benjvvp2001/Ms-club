@@ -1,22 +1,29 @@
 from __future__ import annotations
 
+import hmac
 from typing import Any
 from uuid import UUID
 
-from psycopg import sql
+from psycopg import errors, sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from app.repositories.base import (
+    AcceptResult,
     ApplyResult,
     ClubSport,
+    CreateClubResult,
     OutboxEvent,
     OutboxMessage,
     ReviewResult,
+    StoredAdmin,
     StoredClub,
     StoredComunicado,
     StoredConvocatoria,
+    StoredHilo,
+    StoredInvitacion,
+    StoredMensaje,
     StoredPlan,
     StoredPostulacion,
     StoredSuscripcion,
@@ -33,7 +40,7 @@ from app.schemas.convocatoria import ConvocatoriaFilters
 from app.schemas.postulacion import CandidatoFilters, PostulacionFilters
 
 _CLUB_COLUMNS = """
-    c.id, c.usuario_id, c.nombre, c.descripcion, c.historia, c.email_contacto, c.telefono,
+    c.id, c.usuario_id, c.rut, c.nombre, c.descripcion, c.historia, c.email_contacto, c.telefono,
     c.sitio_web, c.direccion, c.comuna, c.provincia,
     c.latitud::float8 AS latitud, c.longitud::float8 AS longitud, c.logo, c.portada,
     c.redes_sociales, c.estado_verificacion, c.is_active, c.fecha_creacion,
@@ -177,6 +184,48 @@ _CONVOCATORIA_CONDITIONS = f"""
          OR (v.fecha_prueba AT TIME ZONE 'America/Santiago')::date <= %(fecha_hasta)s)
 """
 
+_ADMIN_COLUMNS = "club_id, usuario_id, rol, nombre, agregado_por, fecha_alta"
+
+_INVITACION_COLUMNS = """
+    id, club_id, codigo_hash, creada_por, fecha_creacion, expira_en, usada_por, usada_en,
+    revocada_en
+"""
+
+# Not used, not revoked and not expired (database clock).
+_INVITACION_VIGENTE = "usada_en IS NULL AND revocada_en IS NULL AND expira_en > now()"
+
+_MENSAJE_COLUMNS = "id, hilo_id, autor_id, de, texto, client_message_id, enviado_en"
+
+# A thread with its club, its last message (ultimo_* columns) and the unread
+# messages of each side: those written by the other side after its read mark.
+_HILO_SELECT = """
+    SELECT h.id, h.club_id, c.nombre AS club_nombre, c.logo AS club_logo, h.deportista_id,
+           h.deportista_nombre, h.leido_deportista_id, h.leido_club_id, h.fecha_creacion,
+           u.id AS ultimo_id, u.autor_id AS ultimo_autor_id, u.de AS ultimo_de,
+           u.texto AS ultimo_texto, u.client_message_id AS ultimo_client_message_id,
+           u.enviado_en AS ultimo_enviado_en,
+           (SELECT count(*) FROM consulta_mensaje m
+            WHERE m.hilo_id = h.id AND m.de = 'club'
+              AND m.id > h.leido_deportista_id) AS no_leidos_deportista,
+           (SELECT count(*) FROM consulta_mensaje m
+            WHERE m.hilo_id = h.id AND m.de = 'deportista'
+              AND m.id > h.leido_club_id) AS no_leidos_club
+    FROM consulta_hilo h
+    JOIN club c ON c.id = h.club_id
+    LEFT JOIN LATERAL (
+        SELECT m.id, m.autor_id, m.de, m.texto, m.client_message_id, m.enviado_en
+        FROM consulta_mensaje m
+        WHERE m.hilo_id = h.id
+        ORDER BY m.id DESC
+        LIMIT 1
+    ) u ON true
+"""
+
+_HILO_ORDER = "ORDER BY u.id DESC NULLS LAST, h.fecha_creacion DESC, h.id"
+
+# Read mark of each side, by the side that reads.
+_LEIDO_COLUMN = {"deportista": "leido_deportista_id", "club": "leido_club_id"}
+
 _CONVOCATORIA_COLUMNS = frozenset({
     "deporte_id", "titulo", "descripcion", "categoria_edad", "edad_minima", "edad_maxima",
     "fecha_prueba", "requisitos", "cupos", "direccion", "comuna",
@@ -226,8 +275,11 @@ class PostgresClubRepository:
         condition = "c.id = %s" if include_inactive else "c.id = %s AND c.is_active"
         return self._get_one(condition, club_id)
 
-    def get_club_by_owner(self, usuario_id: UUID) -> StoredClub | None:
-        return self._get_one("c.usuario_id = %s", usuario_id)
+    def get_club_by_admin(self, usuario_id: UUID) -> StoredClub | None:
+        return self._get_one(
+            "c.id = (SELECT a.club_id FROM club_administrador a WHERE a.usuario_id = %s)",
+            usuario_id,
+        )
 
     def _get_one(self, condition: str, value: object) -> StoredClub | None:
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -242,26 +294,46 @@ class PostgresClubRepository:
     # -- club administration (HU-31) ------------------------------------------
 
     def create_club(
-        self, usuario_id: UUID, values: dict[str, Any], deporte_ids: list[int] | None = None
-    ) -> StoredClub | None:
-        columns = {"usuario_id": usuario_id, **_writable(values)}
+        self,
+        usuario_id: UUID,
+        rut: str,
+        nombre_admin: str,
+        values: dict[str, Any],
+        deporte_ids: list[int] | None = None,
+    ) -> tuple[CreateClubResult, StoredClub | None]:
+        # usuario_id stays as the club's creator (historical data).
+        columns = {"usuario_id": usuario_id, "rut": rut, **_writable(values)}
         insert = sql.SQL("INSERT INTO club ({}) VALUES ({}) RETURNING id").format(
             sql.SQL(", ").join(sql.Identifier(column) for column in columns),
             sql.SQL(", ").join(sql.Placeholder(column) for column in columns),
         )
-        with self._pool.connection() as conn, conn.transaction():
-            # Serializes concurrent creations by the same account, since the
-            # table has no unique constraint on usuario_id.
-            conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                (f"club-owner:{usuario_id}",),
-            )
-            if conn.execute("SELECT 1 FROM club WHERE usuario_id = %s", (usuario_id,)).fetchone():
-                return None
-            club_id = conn.execute(insert, _adapt(columns)).fetchone()[0]
-            if deporte_ids:
-                _replace_sports(conn, club_id, deporte_ids)
-        return self.get_club(club_id, include_inactive=True)
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                _lock_account(conn, usuario_id)
+                if conn.execute(
+                    "SELECT 1 FROM club_administrador WHERE usuario_id = %s", (usuario_id,)
+                ).fetchone():
+                    return "ya_administra", None
+                if conn.execute("SELECT 1 FROM club WHERE rut = %s", (rut,)).fetchone():
+                    return "rut_duplicado", None
+                club_id = conn.execute(insert, _adapt(columns)).fetchone()[0]
+                conn.execute(
+                    """
+                    INSERT INTO club_administrador (club_id, usuario_id, rol, nombre)
+                    VALUES (%s, %s, 'PRINCIPAL', %s)
+                    """,
+                    (club_id, usuario_id, nombre_admin),
+                )
+                if deporte_ids:
+                    _replace_sports(conn, club_id, deporte_ids)
+        except errors.UniqueViolation as error:
+            # Another club took the RUT between the check and the insert.
+            if error.diag.constraint_name == "club_rut_uq":
+                return "rut_duplicado", None
+            if error.diag.constraint_name == "club_administrador_usuario_uq":
+                return "ya_administra", None
+            raise
+        return "creado", self.get_club(club_id, include_inactive=True)
 
     def update_club(
         self, club_id: UUID, changes: dict[str, Any], deporte_ids: list[int] | None = None
@@ -317,6 +389,262 @@ class PostgresClubRepository:
                 "DELETE FROM club_deporte WHERE club_id = %s AND deporte_id = %s",
                 (club_id, deporte_id),
             )
+
+    # -- administradores e invitaciones ---------------------------------------------
+
+    def get_admin(self, club_id: UUID, usuario_id: UUID) -> StoredAdmin | None:
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"SELECT {_ADMIN_COLUMNS} FROM club_administrador "
+                "WHERE club_id = %s AND usuario_id = %s",
+                (club_id, usuario_id),
+            )
+            row = cur.fetchone()
+        return StoredAdmin(**row) if row is not None else None
+
+    def list_admins(self, club_id: UUID) -> list[StoredAdmin]:
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"""
+                SELECT {_ADMIN_COLUMNS} FROM club_administrador
+                WHERE club_id = %s
+                ORDER BY rol <> 'PRINCIPAL', fecha_alta, usuario_id
+                """,
+                (club_id,),
+            )
+            return [StoredAdmin(**row) for row in cur.fetchall()]
+
+    def remove_admin(self, club_id: UUID, usuario_id: UUID) -> bool:
+        with self._pool.connection() as conn:
+            deleted = conn.execute(
+                """
+                DELETE FROM club_administrador
+                WHERE club_id = %s AND usuario_id = %s AND rol = 'ADMIN'
+                """,
+                (club_id, usuario_id),
+            )
+            return deleted.rowcount > 0
+
+    def create_invitacion(
+        self, club_id: UUID, creada_por: UUID, codigo_hash: str, horas: int, max_admins: int
+    ) -> StoredInvitacion | None:
+        with self._pool.connection() as conn, conn.transaction():
+            # Serializes the count with other invitations and acceptances of the club.
+            _lock_club_admins(conn, club_id)
+            ocupados = conn.execute(
+                f"""
+                SELECT (SELECT count(*) FROM club_administrador WHERE club_id = %(club_id)s)
+                     + (SELECT count(*) FROM club_invitacion_admin
+                        WHERE club_id = %(club_id)s AND {_INVITACION_VIGENTE})
+                """,
+                {"club_id": club_id},
+            ).fetchone()[0]
+            if ocupados >= max_admins:
+                return None
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO club_invitacion_admin (club_id, codigo_hash, creada_por, expira_en)
+                    VALUES (%s, %s, %s, now() + make_interval(hours => %s))
+                    RETURNING {_INVITACION_COLUMNS}
+                    """,
+                    (club_id, codigo_hash, creada_por, horas),
+                )
+                return StoredInvitacion(**cur.fetchone())
+
+    def list_invitaciones(self, club_id: UUID) -> list[StoredInvitacion]:
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"""
+                SELECT {_INVITACION_COLUMNS} FROM club_invitacion_admin
+                WHERE club_id = %s AND {_INVITACION_VIGENTE}
+                ORDER BY fecha_creacion DESC, id DESC
+                """,
+                (club_id,),
+            )
+            return [StoredInvitacion(**row) for row in cur.fetchall()]
+
+    def revoke_invitacion(self, club_id: UUID, invitacion_id: UUID) -> bool:
+        with self._pool.connection() as conn:
+            updated = conn.execute(
+                f"""
+                UPDATE club_invitacion_admin SET revocada_en = now()
+                WHERE id = %s AND club_id = %s AND {_INVITACION_VIGENTE}
+                """,
+                (invitacion_id, club_id),
+            )
+            return updated.rowcount > 0
+
+    def accept_invitacion(
+        self, codigo_hash: str, usuario_id: UUID, nombre: str, max_admins: int
+    ) -> tuple[AcceptResult, StoredClub | None]:
+        with self._pool.connection() as conn, conn.transaction():
+            # Same lock as creating a club: an account cannot join two clubs at once.
+            _lock_account(conn, usuario_id)
+            if conn.execute(
+                "SELECT 1 FROM club_administrador WHERE usuario_id = %s", (usuario_id,)
+            ).fetchone():
+                return "ya_administra", None
+            # FOR UPDATE: two accounts using the same code at once, only one gets it.
+            row = conn.execute(
+                f"""
+                SELECT id, club_id, codigo_hash, creada_por FROM club_invitacion_admin
+                WHERE codigo_hash = %s AND {_INVITACION_VIGENTE}
+                FOR UPDATE
+                """,
+                (codigo_hash,),
+            ).fetchone()
+            if row is None or not hmac.compare_digest(row[2], codigo_hash):
+                return "no_encontrada", None
+            invitacion_id, club_id, _, creada_por = row
+            _lock_club_admins(conn, club_id)
+            admins = conn.execute(
+                "SELECT count(*) FROM club_administrador WHERE club_id = %s", (club_id,)
+            ).fetchone()[0]
+            if admins >= max_admins:
+                return "sin_cupo", None
+            conn.execute(
+                "UPDATE club_invitacion_admin SET usada_por = %s, usada_en = now() WHERE id = %s",
+                (usuario_id, invitacion_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO club_administrador (club_id, usuario_id, rol, nombre, agregado_por)
+                VALUES (%s, %s, 'ADMIN', %s, %s)
+                """,
+                (club_id, usuario_id, nombre, creada_por),
+            )
+        return "aceptada", self.get_club(club_id, include_inactive=True)
+
+    # -- consultas deportista <-> club (HU-51) ----------------------------------------
+
+    def get_hilo(self, hilo_id: UUID) -> StoredHilo | None:
+        hilos = self._load_hilos(f"{_HILO_SELECT} WHERE h.id = %s", (hilo_id,))
+        return hilos[0] if hilos else None
+
+    def get_hilo_deportista(self, club_id: UUID, deportista_id: UUID) -> StoredHilo | None:
+        hilos = self._load_hilos(
+            f"{_HILO_SELECT} WHERE h.club_id = %s AND h.deportista_id = %s",
+            (club_id, deportista_id),
+        )
+        return hilos[0] if hilos else None
+
+    def ensure_hilo(self, club_id: UUID, deportista_id: UUID, deportista_nombre: str) -> StoredHilo:
+        with self._pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO consulta_hilo (club_id, deportista_id, deportista_nombre)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (club_id, deportista_id) DO NOTHING
+                """,
+                (club_id, deportista_id, deportista_nombre),
+            )
+        hilo = self.get_hilo_deportista(club_id, deportista_id)
+        assert hilo is not None
+        return hilo
+
+    def list_hilos_deportista(self, deportista_id: UUID) -> list[StoredHilo]:
+        return self._load_hilos(
+            f"{_HILO_SELECT} WHERE h.deportista_id = %s AND c.is_active {_HILO_ORDER}",
+            (deportista_id,),
+        )
+
+    def list_hilos_club(self, club_id: UUID) -> list[StoredHilo]:
+        return self._load_hilos(f"{_HILO_SELECT} WHERE h.club_id = %s {_HILO_ORDER}", (club_id,))
+
+    def list_mensajes(
+        self, hilo_id: UUID, *, after_id: int | None, before_id: int | None, limit: int
+    ) -> list[StoredMensaje]:
+        params = {"hilo_id": hilo_id, "after_id": after_id, "before_id": before_id, "limit": limit}
+        conditions = """
+            hilo_id = %(hilo_id)s
+            AND (%(after_id)s::bigint IS NULL OR id > %(after_id)s)
+            AND (%(before_id)s::bigint IS NULL OR id < %(before_id)s)
+        """
+        if after_id is not None:
+            query = f"""
+                SELECT {_MENSAJE_COLUMNS} FROM consulta_mensaje
+                WHERE {conditions} ORDER BY id LIMIT %(limit)s
+            """
+        else:
+            # The latest ones, returned in ascending order.
+            query = f"""
+                SELECT * FROM (
+                    SELECT {_MENSAJE_COLUMNS} FROM consulta_mensaje
+                    WHERE {conditions} ORDER BY id DESC LIMIT %(limit)s
+                ) ultimos ORDER BY id
+            """
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            return [StoredMensaje(**row) for row in cur.fetchall()]
+
+    def add_mensaje(
+        self,
+        hilo_id: UUID,
+        autor_id: UUID,
+        de: str,
+        texto: str,
+        client_message_id: UUID,
+        aviso: OutboxMessage,
+    ) -> tuple[StoredMensaje, bool]:
+        with self._pool.connection() as conn, conn.transaction():
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO consulta_mensaje (hilo_id, autor_id, de, texto, client_message_id)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (hilo_id, autor_id, client_message_id) DO NOTHING
+                    RETURNING {_MENSAJE_COLUMNS}
+                    """,
+                    (hilo_id, autor_id, de, texto, client_message_id),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    # A retry: the message already sent with that id.
+                    cur.execute(
+                        f"""
+                        SELECT {_MENSAJE_COLUMNS} FROM consulta_mensaje
+                        WHERE hilo_id = %s AND autor_id = %s AND client_message_id = %s
+                        """,
+                        (hilo_id, autor_id, client_message_id),
+                    )
+                    return StoredMensaje(**cur.fetchone()), False
+            if de == "club":
+                recipients = "SELECT h.deportista_id FROM consulta_hilo h WHERE h.id = %s"
+            else:
+                recipients = """
+                    SELECT a.usuario_id FROM club_administrador a
+                    JOIN consulta_hilo h ON h.club_id = a.club_id
+                    WHERE h.id = %s
+                """
+            conn.execute(
+                sql.SQL(
+                    "INSERT INTO {} (user_id, kind, title, body, data) "
+                    "SELECT r.user_id, %s, %s, %s, %s FROM ({}) AS r (user_id)"
+                ).format(_OUTBOX, sql.SQL(recipients)),
+                (aviso.kind, aviso.title, aviso.body, Jsonb(aviso.data), hilo_id),
+            )
+        return StoredMensaje(**row), True
+
+    def mark_read(self, hilo_id: UUID, de: str, hasta_id: int) -> None:
+        column = sql.Identifier(_LEIDO_COLUMN[de])
+        with self._pool.connection() as conn:
+            conn.execute(
+                sql.SQL(
+                    """
+                    UPDATE consulta_hilo h
+                    SET {column} = GREATEST(h.{column}, LEAST(%s, COALESCE(
+                        (SELECT max(m.id) FROM consulta_mensaje m WHERE m.hilo_id = h.id), 0)))
+                    WHERE h.id = %s
+                    """
+                ).format(column=column),
+                (hasta_id, hilo_id),
+            )
+
+    def _load_hilos(self, query: str, params: Any) -> list[StoredHilo]:
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            return [_to_hilo(row) for row in cur.fetchall()]
 
 
     # -- convocatorias (HU-32) --------------------------------------------------
@@ -855,6 +1183,32 @@ def _replace_sports(conn: Any, club_id: UUID, deporte_ids: list[int]) -> None:
         """,
         (club_id, deporte_ids),
     )
+
+
+def _lock_account(conn: Any, usuario_id: UUID) -> None:
+    """Serializes creating a club and accepting invitations by one account, so
+    the one-club-per-account check holds (the unique usuario_id backs it)."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"club-admin:{usuario_id}",)
+    )
+
+
+def _lock_club_admins(conn: Any, club_id: UUID) -> None:
+    """Serializes counting a club's administrators and pending invitations."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"club-admins:{club_id}",)
+    )
+
+
+def _to_hilo(row: dict[str, Any]) -> StoredHilo:
+    ultimo = {
+        name: row.pop(f"ultimo_{name}")
+        for name in ("id", "autor_id", "de", "texto", "client_message_id", "enviado_en")
+    }
+    mensaje = None
+    if ultimo["id"] is not None:
+        mensaje = StoredMensaje(hilo_id=row["id"], **ultimo)
+    return StoredHilo(**row, ultimo=mensaje)
 
 
 def _contains(text: str | None) -> str | None:

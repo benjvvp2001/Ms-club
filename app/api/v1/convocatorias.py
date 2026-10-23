@@ -17,7 +17,7 @@ from app.services.convocatoria_service import ConvocatoriaService
 
 # Convocatorias section (HU-32). Reading is public, like the clubs directory;
 # publishing and closing require a club_admin token and only on the club the
-# account owns.
+# account administers (club_administrador).
 router = APIRouter(prefix="/api/v1/clubs", tags=["convocatorias"])
 
 
@@ -53,7 +53,7 @@ def convocatoria_detail(
     response_model=ConvocatoriaRead,
     status_code=status.HTTP_201_CREATED,
     summary="Publicar una convocatoria del club",
-    description="Solo el representante dueño del club. La fecha debe ser futura y los cupos "
+    description="Solo un administrador del club. La fecha debe ser futura y los cupos "
     "mayores que cero; el deporte debe estar entre los que ofrece el club.",
 )
 def publish_convocatoria(

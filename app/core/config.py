@@ -69,6 +69,22 @@ def get_users_service_settings() -> UsersServiceSettings:
     return UsersServiceSettings(url=url, timeout_seconds=timeout)
 
 
+CLUB_MAX_ADMINS_DEFAULT = 10
+
+
+def get_club_max_admins() -> int:
+    """How many administrators a club may have, counting pending invitations.
+    The product asks for at least 3."""
+    raw = os.getenv("CLUB_MAX_ADMINS", str(CLUB_MAX_ADMINS_DEFAULT)).strip()
+    try:
+        value = int(raw or CLUB_MAX_ADMINS_DEFAULT)
+    except ValueError as error:
+        raise RuntimeError("CLUB_MAX_ADMINS must be an integer") from error
+    if not 3 <= value <= 100:
+        raise RuntimeError("CLUB_MAX_ADMINS must be between 3 and 100")
+    return value
+
+
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:

@@ -20,7 +20,7 @@ from app.schemas.postulacion import (
 from app.services.postulacion_service import PostulacionService
 
 # Postulaciones. HU-33: only athletes (roles player/usuario) apply and follow
-# their own applications. HU-34: only the representative of the club that owns
+# their own applications. HU-34: only an administrator of the club that owns
 # the convocatoria lists its candidates and decides on them.
 router = APIRouter(prefix="/api/v1/clubs", tags=["postulaciones"])
 
@@ -61,7 +61,7 @@ def apply(
     "/announcements/{convocatoria_id}/applications",
     response_model=CandidatoPage,
     summary="Candidatos de una convocatoria",
-    description="Solo el representante del club dueño. Perfil deportivo adjunto, antecedentes y "
+    description="Solo un administrador del club. Perfil deportivo adjunto, antecedentes y "
     "fecha de postulación, la más antigua primero. Filtro opcional: estado (PENDIENTE, "
     "PRESELECCIONADO, ACEPTADO, RECHAZADO). Incluye el conteo por estado.",
 )
@@ -78,7 +78,7 @@ def list_candidatos(
     "/announcements/applications/{postulacion_id}",
     response_model=CandidatoRead,
     summary="Cambiar el estado de un candidato",
-    description="Solo el representante del club dueño. Estados: PRESELECCIONADO, ACEPTADO, "
+    description="Solo un administrador del club. Estados: PRESELECCIONADO, ACEPTADO, "
     "RECHAZADO, con comentario opcional para el deportista. Si el estado cambia, se avisa al "
     "deportista (bandeja y push vía Ms_gateway); repetir el mismo estado no genera aviso.",
 )

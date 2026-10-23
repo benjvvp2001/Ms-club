@@ -23,11 +23,14 @@ class ClubSport:
 
 @dataclass
 class StoredClub:
-    """A row of the club table (existing columns plus 001_club_profile_admin)."""
+    """A row of the club table (existing columns plus 001_club_profile_admin
+    and 007's rut). usuario_id is who created it; who manages it is in
+    club_administrador."""
 
     id: UUID
     nombre: str
     usuario_id: UUID | None = None
+    rut: str | None = None
     descripcion: str | None = None
     historia: str | None = None
     email_contacto: str | None = None
@@ -46,6 +49,33 @@ class StoredClub:
     fecha_creacion: datetime | None = None
     fecha_actualizacion: datetime | None = None
     deportes: list[ClubSport] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class StoredAdmin:
+    """A row of club_administrador (007): an account that manages a club."""
+
+    club_id: UUID
+    usuario_id: UUID
+    rol: str  # PRINCIPAL | ADMIN
+    nombre: str
+    agregado_por: UUID | None = None
+    fecha_alta: datetime | None = None
+
+
+@dataclass(frozen=True)
+class StoredInvitacion:
+    """A row of club_invitacion_admin (007). Only the code's hash is stored."""
+
+    id: UUID
+    club_id: UUID
+    codigo_hash: str
+    creada_por: UUID
+    fecha_creacion: datetime
+    expira_en: datetime
+    usada_por: UUID | None = None
+    usada_en: datetime | None = None
+    revocada_en: datetime | None = None
 
 
 @dataclass
@@ -181,6 +211,44 @@ class StoredSuscripcion:
     club_id: UUID | None = None
 
 
+@dataclass(frozen=True)
+class StoredMensaje:
+    """A row of consulta_mensaje (008). de: deportista | club."""
+
+    id: int
+    hilo_id: UUID
+    autor_id: UUID
+    de: str
+    texto: str
+    client_message_id: UUID
+    enviado_en: datetime
+
+
+@dataclass
+class StoredHilo:
+    """A row of consulta_hilo (008) with its club, its last message and how
+    many messages each side has not read yet."""
+
+    id: UUID
+    club_id: UUID
+    club_nombre: str
+    club_logo: str | None
+    deportista_id: UUID
+    deportista_nombre: str
+    leido_deportista_id: int = 0
+    leido_club_id: int = 0
+    fecha_creacion: datetime | None = None
+    ultimo: StoredMensaje | None = None
+    # Club messages the athlete has not read, and athlete messages the club has not read.
+    no_leidos_deportista: int = 0
+    no_leidos_club: int = 0
+
+
+# Outcome of creating a club; the checks run atomically with the inserts.
+CreateClubResult = Literal["creado", "ya_administra", "rut_duplicado"]
+# Outcome of accepting an invitation. no_encontrada covers an unknown, expired,
+# used or revoked code alike.
+AcceptResult = Literal["aceptada", "no_encontrada", "ya_administra", "sin_cupo"]
 # Outcome of an application; every check runs atomically with the insert.
 ApplyResult = Literal["creada", "no_encontrada", "no_abierta", "duplicada", "sin_cupos"]
 # Outcome of a review. sin_cambios: same estado (the comment may still change).
@@ -199,15 +267,105 @@ class ClubRepository(Protocol):
 
     def get_club(self, club_id: UUID, *, include_inactive: bool = False) -> StoredClub | None: ...
 
-    def get_club_by_owner(self, usuario_id: UUID) -> StoredClub | None:
-        """The club managed by that account, active or not."""
+    def get_club_by_admin(self, usuario_id: UUID) -> StoredClub | None:
+        """The club that account administers (club_administrador), active or not."""
         ...
 
     def create_club(
-        self, usuario_id: UUID, values: dict[str, Any], deporte_ids: list[int] | None = None
-    ) -> StoredClub | None:
-        """Insert the club with its sports; None when that account already
-        manages one. The check and the inserts are atomic."""
+        self,
+        usuario_id: UUID,
+        rut: str,
+        nombre_admin: str,
+        values: dict[str, Any],
+        deporte_ids: list[int] | None = None,
+    ) -> tuple[CreateClubResult, StoredClub | None]:
+        """Insert the club (usuario_id kept as its creator) with its sports and
+        the account as its PRINCIPAL administrator. ya_administra when the
+        account already administers a club, rut_duplicado when another club has
+        that RUT. The checks and the inserts are atomic."""
+        ...
+
+    # -- administradores e invitaciones ---------------------------------------------
+
+    def get_admin(self, club_id: UUID, usuario_id: UUID) -> StoredAdmin | None:
+        """The account's row in club_administrador for that club."""
+        ...
+
+    def list_admins(self, club_id: UUID) -> list[StoredAdmin]:
+        """The club's administrators, the PRINCIPAL first, then by fecha_alta."""
+        ...
+
+    def remove_admin(self, club_id: UUID, usuario_id: UUID) -> bool:
+        """Delete an ADMIN of the club (never the PRINCIPAL); False when there was none."""
+        ...
+
+    def create_invitacion(
+        self, club_id: UUID, creada_por: UUID, codigo_hash: str, horas: int, max_admins: int
+    ) -> StoredInvitacion | None:
+        """Insert an invitation valid for horas; None when the club's
+        administrators plus its pending invitations already reach max_admins.
+        The count and the insert are atomic."""
+        ...
+
+    def list_invitaciones(self, club_id: UUID) -> list[StoredInvitacion]:
+        """Pending invitations (not used, revoked nor expired), newest first."""
+        ...
+
+    def revoke_invitacion(self, club_id: UUID, invitacion_id: UUID) -> bool:
+        """Revoke a pending invitation of that club; False when there is none."""
+        ...
+
+    def accept_invitacion(
+        self, codigo_hash: str, usuario_id: UUID, nombre: str, max_admins: int
+    ) -> tuple[AcceptResult, StoredClub | None]:
+        """Use a pending invitation and add the account as ADMIN of its club,
+        atomically and only once."""
+        ...
+
+    # -- consultas deportista <-> club (HU-51) ----------------------------------------
+
+    def get_hilo(self, hilo_id: UUID) -> StoredHilo | None: ...
+
+    def get_hilo_deportista(self, club_id: UUID, deportista_id: UUID) -> StoredHilo | None: ...
+
+    def ensure_hilo(self, club_id: UUID, deportista_id: UUID, deportista_nombre: str) -> StoredHilo:
+        """The athlete's thread with the club, created if missing (a concurrent
+        creation returns the same thread)."""
+        ...
+
+    def list_hilos_deportista(self, deportista_id: UUID) -> list[StoredHilo]:
+        """The athlete's threads with active clubs, latest message first."""
+        ...
+
+    def list_hilos_club(self, club_id: UUID) -> list[StoredHilo]:
+        """The club's threads, latest message first."""
+        ...
+
+    def list_mensajes(
+        self, hilo_id: UUID, *, after_id: int | None, before_id: int | None, limit: int
+    ) -> list[StoredMensaje]:
+        """Up to limit messages in ascending id: the first ones after after_id,
+        otherwise the last ones before before_id (or the latest ones)."""
+        ...
+
+    def add_mensaje(
+        self,
+        hilo_id: UUID,
+        autor_id: UUID,
+        de: str,
+        texto: str,
+        client_message_id: UUID,
+        aviso: OutboxMessage,
+    ) -> tuple[StoredMensaje, bool]:
+        """Insert the message, or return the one already sent with that
+        client_message_id by that author (False). Only a new message writes
+        aviso to the outbox, in the same transaction: to the athlete when the
+        club writes, to every administrator of the club when the athlete does."""
+        ...
+
+    def mark_read(self, hilo_id: UUID, de: str, hasta_id: int) -> None:
+        """Move that side's read mark forward to hasta_id (never back, never
+        past the thread's last message). de is the side that read."""
         ...
 
     def update_club(
