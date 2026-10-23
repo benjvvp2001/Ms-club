@@ -3,12 +3,32 @@
 `ms-club` usa la base `sportmatch_clubs` creada en pgAdmin. Las tablas
 pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 
-- `club`: columnas originales `id`, `usuario_id` (cuenta del representante, no se
-  expone), `nombre`, `descripcion`, `email_contacto`, `telefono`, `direccion`,
-  `latitud`, `longitud`, `logo`, `is_active`, `fecha_creacion`.
+- `club`: columnas originales `id`, `usuario_id` (cuenta que creó el club, no se
+  expone; desde la 007 es solo un dato histórico), `nombre`, `descripcion`,
+  `email_contacto`, `telefono`, `direccion`, `latitud`, `longitud`, `logo`,
+  `is_active`, `fecha_creacion`.
   La migración 001 agrega `historia`, `comuna`, `provincia`, `sitio_web`,
   `redes_sociales` (jsonb), `portada`, `estado_verificacion` (`pendiente` por
   defecto) y `fecha_actualizacion`, más el índice `club_usuario_idx`.
+  La 007 agrega `rut` (`varchar(12)`, formato `76123456-0`, `CHECK` de formato e
+  índice único `club_rut_uq`; los clubes anteriores pueden quedar sin RUT).
+- `club_administrador` (migración 007): quién gestiona cada club. PK
+  `(club_id, usuario_id)`; `usuario_id` único (una cuenta administra un solo club);
+  `rol` `PRINCIPAL` (quien lo creó; uno por club, índice único parcial) o `ADMIN`;
+  `nombre` (copiado de Ms_Users al entrar, o `Administrador del club`),
+  `agregado_por` y `fecha_alta`. La 007 la llena con los `club.usuario_id`
+  actuales como `PRINCIPAL` (si una cuenta tenía varios clubes, queda el más antiguo).
+- `club_invitacion_admin` (007): códigos de un solo uso para sumar administradores.
+  Solo guarda `codigo_hash` (SHA-256, único), `creada_por`, `fecha_creacion`,
+  `expira_en` (72 h), `usada_por`/`usada_en` y `revocada_en`. Nunca se borran.
+- `consulta_hilo` (migración 008): una conversación por club y deportista
+  (`UNIQUE (club_id, deportista_id)`), con `deportista_nombre` (copia de Ms_Users al
+  crearla) y el último mensaje leído por cada lado (`leido_deportista_id`,
+  `leido_club_id`).
+- `consulta_mensaje` (008): `id` bigint identity (sirve para paginar), `hilo_id`,
+  `autor_id`, `de` (`deportista` o `club`), `texto` (1–1000), `client_message_id`
+  (UUID de la app; `UNIQUE (hilo_id, autor_id, client_message_id)` hace idempotente
+  el reintento) y `enviado_en`. No se editan ni se borran.
 - `deporte`: catálogo (`id`, `nombre`, `descripcion`, `is_active`). El servicio solo lo lee.
 - `club_deporte`: deportes de cada club; el representante los agrega y quita.
 - `convocatoria` (migración 002): pruebas que publica un club (`club_id` → `club`,
@@ -59,6 +79,10 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 | `plan_suscripcion` | SELECT | 006 |
 | `transaccion_pago`, `suscripcion` | SELECT, INSERT, UPDATE (nunca se borran) | 006 |
 | `clubs_api.notification_outbox` | USAGE del esquema; SELECT, INSERT, UPDATE, DELETE | 004 (el servicio inserta; el worker del gateway, con este mismo rol, lee, marca y purga) |
+| `club_administrador` | SELECT, INSERT, DELETE (quitar o salir) | 007 |
+| `club_invitacion_admin` | SELECT, INSERT, UPDATE (marcar usada o revocada; nunca se borra) | 007 |
+| `consulta_hilo` | SELECT, INSERT, UPDATE (marcas de leído) | 008 |
+| `consulta_mensaje` | SELECT, INSERT (la columna identity no requiere permisos sobre secuencias) | 008 |
 
 No tiene DELETE sobre `club` ni acceso a `interesado_club`.
 
@@ -86,6 +110,12 @@ En pgAdmin, conectado a `sportmatch_clubs` como `postgres`, una vez y en orden:
 7. `db/migrations/006_pagos.sql`: planes, transacciones de pago y suscripciones. Mismas
    garantías. Después, solo en desarrollo, `db/seeds/demo_planes.sql` (como `postgres`)
    para tener dos planes de prueba.
+8. `db/migrations/007_club_rut_administradores.sql`: `club.rut`, `club_administrador`
+   (con los dueños actuales como `PRINCIPAL`) y `club_invitacion_admin`. Mismas
+   garantías. Sin ella fallan todas las rutas de administración (la autorización lee
+   `club_administrador`).
+9. `db/migrations/008_consultas_club.sql`: `consulta_hilo` y `consulta_mensaje`. Mismas
+   garantías; requiere la 007 y el outbox de la 004.
 
 `python -m app.database.migrate` aplica las migraciones con el usuario de `DB_*`;
 con el rol del servicio solo sirve para comprobar que ya están aplicadas.
