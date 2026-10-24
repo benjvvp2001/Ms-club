@@ -7,6 +7,7 @@ from app.core.config import WebpaySettings, get_club_max_admins
 from app.core.security import Actor, authenticate
 from app.repositories.base import ClubRepository
 from app.services.administrador_service import AdministradorService
+from app.services.canal_service import CanalService
 from app.services.club_service import ClubService
 from app.services.comunicado_service import ComunicadoService
 from app.services.consulta_service import ConsultaService
@@ -48,6 +49,10 @@ def get_consulta_service(
     names: AccountNames | None = Depends(get_account_names),
 ) -> ConsultaService:
     return ConsultaService(repository, names)
+
+
+def get_canal_service(repository: ClubRepository = Depends(get_repository)) -> CanalService:
+    return CanalService(repository)
 
 
 def get_convocatoria_service(
@@ -143,5 +148,15 @@ def get_consulta_athlete(actor: Actor = Depends(get_current_actor)) -> Actor:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Solo los deportistas pueden escribir consultas a un club.",
+        )
+    return actor
+
+
+def get_canal_athlete(actor: Actor = Depends(get_current_actor)) -> Actor:
+    """Guard of the athlete's channel routes: a valid token with an athlete role."""
+    if not actor.is_athlete:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los deportistas pueden usar los canales de un club como miembros.",
         )
     return actor

@@ -6,14 +6,17 @@ from fastapi import HTTPException, status
 
 from app.core.security import Actor
 from app.repositories.base import (
+    AccesoDeportista,
     AccesoHilo,
     ClubRepository,
+    HiloEliminado,
     OutboxMessage,
     StoredClub,
     StoredHilo,
     StoredMensaje,
 )
 from app.schemas.consulta import (
+    ConsultaIniciada,
     HiloClub,
     HiloDeportista,
     Lado,
@@ -37,6 +40,11 @@ class ConsultaService:
     Reading messages and marking them read are what the app polls (sección F):
     each is one repository call (one connection, one statement) and never
     calls Ms_Users.
+
+    Only active postulantes of the club (a postulación other than RECHAZADO)
+    take part (G3): the athlete reads and writes only then, and the club may
+    write first to one of them. A rejection that leaves no active postulación
+    deletes the thread.
     """
 
     def __init__(self, repository: ClubRepository, names: AccountNames | None = None) -> None:
@@ -61,29 +69,36 @@ class ConsultaService:
 
     def my_messages(self, actor: Actor, club_id: UUID, filters: MensajeFilters) -> MensajesPage:
         # hilo_id is None until the athlete writes for the first time.
-        found, hilo_id, mensajes = self._repository.mensajes_deportista(
+        acceso, hilo_id, mensajes = self._repository.mensajes_deportista(
             club_id, actor.id,
             after_id=filters.after_id, before_id=filters.before_id, limit=filters.limit,
         )
-        if not found:
-            raise club_not_found()
+        _check_acceso_deportista(acceso)
         return MensajesPage(hilo_id=hilo_id, mensajes=[_mensaje(m, "deportista") for m in mensajes])
 
     def send_as_athlete(self, actor: Actor, club_id: UUID, payload: MensajeCreate) -> Mensaje:
         club = self._active_club(club_id)
+        if not self._repository.es_postulante_activo(club.id, actor.id):
+            raise not_postulante()
         hilo = self._repository.get_hilo_deportista(club.id, actor.id)
         if hilo is None:
             nombre = account_name(self._names, actor, ATHLETE_NAME_FALLBACK)
             hilo = self._repository.ensure_hilo(club.id, actor.id, nombre)
-        mensaje, _ = self._repository.add_mensaje(
-            hilo.id, actor.id, "deportista", payload.texto, payload.client_message_id,
-            _aviso_al_club(hilo),
-        )
+            if hilo is None:  # rejected meanwhile
+                raise not_postulante()
+        try:
+            mensaje, _ = self._repository.add_mensaje(
+                hilo.id, actor.id, "deportista", payload.texto, payload.client_message_id,
+                _aviso_al_club(hilo),
+            )
+        except HiloEliminado as error:  # rejected meanwhile
+            raise not_postulante() from error
         return _mensaje(mensaje, "deportista")
 
     def mark_read_as_athlete(self, actor: Actor, club_id: UUID, payload: LeidoUpdate) -> None:
-        if not self._repository.mark_read_deportista(club_id, actor.id, payload.hasta_id):
-            raise club_not_found()
+        _check_acceso_deportista(
+            self._repository.mark_read_deportista(club_id, actor.id, payload.hasta_id)
+        )
 
     # -- club side (administrators) ------------------------------------------------------
 
@@ -122,11 +137,44 @@ class ConsultaService:
                 detail="El club está inactivo: no puede responder consultas.",
             )
         hilo = self._club_thread(club, hilo_id)
-        mensaje, _ = self._repository.add_mensaje(
-            hilo.id, actor.id, "club", payload.texto, payload.client_message_id,
-            _aviso_al_deportista(club, hilo),
-        )
+        try:
+            mensaje, _ = self._repository.add_mensaje(
+                hilo.id, actor.id, "club", payload.texto, payload.client_message_id,
+                _aviso_al_deportista(club, hilo),
+            )
+        except HiloEliminado as error:
+            raise _thread_not_found() from error
         return _mensaje(mensaje, "club")
+
+    def start_with_postulante(
+        self, actor: Actor, club_id: UUID, usuario_id: UUID, payload: MensajeCreate
+    ) -> ConsultaIniciada:
+        """The club writes to one of its active postulantes, creating the
+        thread if needed (G3). The athlete's name is the one the club already
+        sees in their postulación, never one sent by the client."""
+        club = require_managed_club(self._repository, actor, club_id)
+        if not club.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El club está inactivo: no puede escribir consultas.",
+            )
+        hilo = self._repository.get_hilo_deportista(club.id, usuario_id)
+        if hilo is None:
+            nombre = self._repository.nombre_postulante(club.id, usuario_id)
+            if nombre is not None:
+                hilo = self._repository.ensure_hilo(club.id, usuario_id, nombre)
+        elif not self._repository.es_postulante_activo(club.id, usuario_id):
+            hilo = None
+        if hilo is None:
+            raise _postulante_not_found()
+        try:
+            mensaje, _ = self._repository.add_mensaje(
+                hilo.id, actor.id, "club", payload.texto, payload.client_message_id,
+                _aviso_al_deportista(club, hilo),
+            )
+        except HiloEliminado as error:
+            raise _postulante_not_found() from error
+        return ConsultaIniciada(hilo_id=hilo.id, mensaje=_mensaje(mensaje, "club"))
 
     def mark_read_as_club(
         self, actor: Actor, club_id: UUID, hilo_id: UUID, payload: LeidoUpdate
@@ -147,15 +195,37 @@ class ConsultaService:
         return club
 
     def _club_thread(self, club: StoredClub, hilo_id: UUID) -> StoredHilo:
-        """A thread of that club; another club's thread is a 404, never a 403."""
+        """A thread of that club with an active postulante; another club's
+        thread is a 404, never a 403."""
         hilo = self._repository.get_hilo(hilo_id)
-        if hilo is None or hilo.club_id != club.id:
+        if (
+            hilo is None or hilo.club_id != club.id
+            or not self._repository.es_postulante_activo(club.id, hilo.deportista_id)
+        ):
             raise _thread_not_found()
         return hilo
 
 
 def _thread_not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Consulta no encontrada.")
+
+
+def _postulante_not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Postulante no encontrado.")
+
+
+def not_postulante() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Solo puedes escribir a clubes a los que postulaste.",
+    )
+
+
+def _check_acceso_deportista(acceso: AccesoDeportista) -> None:
+    if acceso == "sin_club":
+        raise club_not_found()
+    if acceso == "no_postulante":
+        raise not_postulante()
 
 
 def _check_acceso(acceso: AccesoHilo) -> None:
@@ -192,9 +262,15 @@ def _aviso_al_club(hilo: StoredHilo) -> OutboxMessage:
 
 
 def _aviso_al_deportista(club: StoredClub, hilo: StoredHilo) -> OutboxMessage:
+    """When the club writes: an answer if the athlete wrote before, otherwise
+    the club starting the conversation (G3)."""
+    if hilo.ultimo is None:
+        title, body = f"Mensaje de {club.nombre}", f"{club.nombre} te escribió."
+    else:
+        title, body = f"Respuesta de {club.nombre}", f"{club.nombre} respondió tu consulta."
     return OutboxMessage(
         kind="consulta",
-        title=f"Respuesta de {club.nombre}",
-        body=f"{club.nombre} respondió tu consulta.",
+        title=title,
+        body=body,
         data={"screen": "consulta", "clubId": str(club.id), "hiloId": str(hilo.id)},
     )

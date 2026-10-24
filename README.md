@@ -18,8 +18,10 @@ Trabaja sobre las tablas existentes de la base `sportmatch_clubs` (`club`,
 `004_revision_postulaciones.sql` los estados de revisión y el outbox de notificaciones y
 `005_comunicados.sql` las tablas de comunicados, `006_pagos.sql` planes, pagos y
 suscripciones, `007_club_rut_administradores.sql` el RUT del club y sus administradores,
-`008_consultas_club.sql` las consultas deportista ↔ club y `009_admin_por_correo.sql`
-las asignaciones de administradores por correo (reemplazan a las invitaciones).
+`008_consultas_club.sql` las consultas deportista ↔ club, `009_admin_por_correo.sql`
+las asignaciones de administradores por correo (reemplazan a las invitaciones) y
+`010_consultas_postulantes_canales.sql` el borrado de consultas al rechazar y los canales
+del club.
 
 ```
 app/
@@ -32,6 +34,7 @@ app/
   api/v1/administradores.py administradores y asignaciones por correo (/{id}/admins,
                           /{id}/admins/assignments)
   api/v1/consultas.py     consultas deportista ↔ club (/consultas/me, /{id}/consultas)
+  api/v1/canales.py       canales del club (/canales/me, /{id}/canales)
   api/dependencies.py     inyección de repositorio y servicio; usuario autenticado (Bearer)
   core/config.py          DB_*, JWT_*, USERS_*, CLUB_MAX_ADMINS y WEBPAY_*
   core/security.py        validación del JWT de Ms_Users, roles (club_admin, admin) y correo
@@ -51,7 +54,8 @@ db/
   migrations/             001: perfil; 002: convocatoria; 003: postulaciones; 004: revisión y outbox;
                           005: comunicados; 006: planes, pagos y suscripciones;
                           007: RUT y administradores; 008: consultas;
-                          009: asignaciones de administradores por correo
+                          009: asignaciones de administradores por correo;
+                          010: consultas solo con postulantes y canales del club
   seeds/demo_planes.sql   planes de PRUEBA para desarrollo (no son el catálogo real)
                           (todas como postgres)
 tests/                    pruebas de la API con el repositorio mock
@@ -80,6 +84,15 @@ tests/                    pruebas de la API con el repositorio mock
 | GET | `/api/v1/clubs/{id}/consultas` | admin del club | Bandeja compartida de consultas del club. |
 | GET, POST | `/api/v1/clubs/{id}/consultas/{hilo_id}/messages` | admin del club | Leer y responder una consulta. |
 | POST | `/api/v1/clubs/{id}/consultas/{hilo_id}/read` | admin del club | Marcar como leído. |
+| POST | `/api/v1/clubs/{id}/consultas/postulantes/{usuario_id}/messages` | admin del club | Escribirle primero a un postulante activo. |
+| GET, POST | `/api/v1/clubs/{id}/canales` | admin del club | Canales del club; crear uno (entran los aceptados). |
+| PATCH, DELETE | `/api/v1/clubs/{id}/canales/{canal_id}` | admin del club | Editar o eliminar un canal. |
+| GET | `/api/v1/clubs/{id}/canales/{canal_id}/miembros`, `/candidatos` | admin del club | Miembros y postulantes que se pueden agregar. |
+| PUT, DELETE | `/api/v1/clubs/{id}/canales/{canal_id}/miembros/{usuario_id}` | admin del club | Agregar o sacar a un postulante. |
+| GET, POST | `/api/v1/clubs/{id}/canales/{canal_id}/messages`, POST `/read` | admin del club | Mensajes del canal como club. |
+| POST | `/api/v1/clubs/{id}/canales/{canal_id}/inactividad` | admin del club | Responder al aviso de inactividad (eliminar o mantener). |
+| GET | `/api/v1/clubs/canales/me` | Deportista | Mis canales. |
+| GET, POST | `/api/v1/clubs/canales/{canal_id}/messages`, POST `/read`, PUT `/mute` | Deportista (miembro) | Leer, escribir (si el club lo permite), marcar leído y silenciar. |
 | GET | `/api/v1/clubs/announcements` | Público | Sección de convocatorias (por defecto, abiertas). |
 | GET | `/api/v1/clubs/announcements/{id}` | Público | Detalle de una convocatoria. |
 | POST | `/api/v1/clubs/{id}/announcements` | admin del club | Publica una convocatoria del club. |
@@ -391,6 +404,27 @@ respuestas firmadas por el club, nunca por la persona (no se expone `autor_id`).
   **sin su texto**, con `kind: "consulta"`: al deportista cuando responde el club
   (`data: {screen: "consulta", clubId, hiloId}`) y a cada administrador cuando escribe
   el deportista (`data: {screen: "consulta_club", clubId, hiloId}`).
+- Solo con postulantes (G3): el deportista lee y escribe solo si tiene una postulación
+  distinta de `RECHAZADO` en el club (si no, `403`); el club puede escribir primero con
+  `POST /{club_id}/consultas/postulantes/{usuario_id}/messages` (`404` si no es postulante
+  activo; el nombre sale del perfil de su postulación). Al rechazar una postulación sin
+  que quede otra activa en el club, la conversación se borra en la misma transacción.
+
+## Canales del club (G4)
+
+Anuncios del club a grupos de sus deportistas: hasta 20 canales por club y 500 miembros
+por canal. Al crear uno entran los deportistas con alguna postulación `ACEPTADO`; luego
+se agregan o sacan postulantes activos a mano. Escriben los administradores (firmado
+como el club) y, si `miembros_escriben`, también los miembros. Otro club o quien no es
+miembro recibe `404`. Avisos (`kind: "canal"`, sin el texto) a los miembros que no lo
+silenciaron. Leer y marcar leído son una conexión y una sentencia, sin Ms_Users.
+
+Inactividad: un hilo de fondo revisa cada hora (con `pg_try_advisory_lock`, una sola
+instancia a la vez) los canales sin mensajes hace 30 días, avisa a los administradores
+(`data: {screen: "canal_inactivo", clubId, canalId}`) y marca `aviso_inactividad_en`. El
+club responde `eliminar` o `mantener` (30 días más, `mantener_hasta`); sin respuesta en 7
+días se elimina. Un mensaje nuevo cancela el aviso. `CANALES_INACTIVIDAD_ENABLED=false`
+lo apaga; solo corre con la base real.
 
 ## Pagos con Webpay Plus (HU-40)
 
@@ -477,7 +511,8 @@ Una vez, en pgAdmin conectado a `sportmatch_clubs` como `postgres`, en este orde
 8. `db/migrations/007_club_rut_administradores.sql`.
 9. `db/migrations/008_consultas_club.sql`.
 10. `db/migrations/009_admin_por_correo.sql`.
-11. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
+11. `db/migrations/010_consultas_postulantes_canales.sql`.
+12. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
 
 ```bash
 pip install -e ".[dev]"

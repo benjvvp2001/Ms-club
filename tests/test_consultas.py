@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,8 +14,29 @@ CLUBS_PATH = "/api/v1/clubs"
 MY_THREADS = "/api/v1/clubs/consultas/me"
 
 
+def postular(repository, club_id: UUID, usuario_id: UUID, *, nombre: str = "Ana",
+             apellido_inicial: str = "T.", estado: str = "PENDIENTE") -> UUID:
+    """A postulación of usuario_id to a new convocatoria of the club (G3: only
+    active postulantes take part in consultas and channels)."""
+    convocatoria = repository.create_convocatoria(club_id, {
+        "deporte_id": 1, "categoria_edad": "Sub-17",
+        "fecha_prueba": datetime.now(timezone.utc) + timedelta(days=10),
+        "requisitos": [], "cupos": 40, "direccion": "Av. Grecia 2001",
+    })
+    result, postulacion = repository.create_postulacion(convocatoria.id, usuario_id, {
+        "perfil_deportivo": {
+            "nombre": nombre, "apellido_inicial": apellido_inicial, "edad": 16,
+            "foto_perfil": None, "biografia": None, "deportes": [],
+        },
+    })
+    assert result == "creada" and postulacion is not None
+    if estado != "PENDIENTE":
+        repository.set_postulacion_estado(postulacion.id, estado)
+    return postulacion.id
+
+
 class Consultas(Admins):
-    """A club with a PRINCIPAL and one ADMIN, and an athlete."""
+    """A club with a PRINCIPAL and one ADMIN, and an athlete who applied."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -22,6 +44,10 @@ class Consultas(Admins):
         self.athlete = uuid4()
         self.names.names[self.athlete] = "Ana Torres"
         self.athlete_headers = token(self.athlete, "player")
+        self.postulacion = self.postular(self.athlete)
+
+    def postular(self, usuario_id: UUID, **fields) -> UUID:
+        return postular(self.repository, self.club_id, usuario_id, **fields)
 
     # athlete side
     def write(self, texto: str = "¿Cuándo son las pruebas Sub-17?", headers: dict | None = None,
@@ -252,7 +278,9 @@ def test_unread_counts_and_read_marks():
 
 def test_threads_are_ordered_by_last_message():
     setup = Consultas()
-    other_athlete = token(uuid4(), "usuario")
+    other_id = uuid4()
+    setup.postular(other_id)
+    other_athlete = token(other_id, "usuario")
     setup.write()
     setup.write(headers=other_athlete)
     first_hilo = setup.hilo_id()
@@ -334,7 +362,9 @@ def test_club_admin_cannot_use_the_athlete_routes():
 def test_athletes_only_see_their_own_thread():
     setup = Consultas()
     setup.write("Mía")
-    other = token(uuid4(), "player")
+    other_id = uuid4()
+    setup.postular(other_id)
+    other = token(other_id, "player")
     assert setup.my_messages(headers=other).json() == {"hilo_id": None, "mensajes": []}
     assert setup.my_threads(other).json() == []
 

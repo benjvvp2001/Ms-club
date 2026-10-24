@@ -11,6 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.v1.administradores import router as administradores_router
+from app.api.v1.canales import router as canales_router
 from app.api.v1.clubs import router as clubs_router
 from app.api.v1.comunicados import router as comunicados_router
 from app.api.v1.consultas import router as consultas_router
@@ -28,6 +29,7 @@ from app.core.config import (
 from app.database.session import check_connection, create_pool
 from app.repositories.base import ClubRepository
 from app.repositories.postgres_club_repository import PostgresClubRepository
+from app.services import canal_inactividad
 from app.services.users_client import AthleteProfiles, UsersClient
 from app.services.webpay import WebpayGateway, build_webpay
 
@@ -43,6 +45,7 @@ def create_app(
     users: AthleteProfiles | None = None,
     webpay: WebpayGateway | None = None,
     webpay_settings: WebpaySettings | None = None,
+    inactividad: bool | None = None,
 ) -> FastAPI:
     """Create the service without routes outside the approved clubs prefix.
 
@@ -52,6 +55,10 @@ def create_app(
     inject a MockClubRepository instead so they don't need a live database, and a
     fake users source so applying never calls Ms_Users. The same goes for the
     Webpay gateway (WEBPAY_* variables): tests inject a MockWebpay.
+
+    The hourly check of inactive channels (G4) runs in a daemon thread while
+    the server is up: by default only with the real database and unless
+    CANALES_INACTIVIDAD_ENABLED is false; inactividad forces it on or off.
     """
     owns_pool = repository is None
     owns_users = users is None
@@ -80,9 +87,18 @@ def create_app(
         if owns_webpay:
             app.state.webpay_settings = get_webpay_settings()
             app.state.webpay = build_webpay(app.state.webpay_settings)
+        worker = None
+        run_worker = (
+            inactividad if inactividad is not None else owns_pool and canal_inactividad.enabled()
+        )
+        if run_worker:
+            worker = canal_inactividad.InactividadWorker(app.state.repository)
+            worker.start()
         try:
             yield
         finally:
+            if worker is not None:
+                worker.stop()
             if owns_webpay and getattr(app.state, "webpay", None) is not None:
                 app.state.webpay.close()
             if http_client is not None:
@@ -126,12 +142,13 @@ def create_app(
                 raise HTTPException(status_code=503, detail="clubs database unavailable") from error
         return {"status": "ready", "service": "ms_club"}
 
-    # Convocatorias, postulaciones, comunicados, consultas and administradores first:
-    # their fixed paths (/announcements, /notices/me, /consultas/me) must not be
+    # Convocatorias, postulaciones, comunicados, consultas, canales and administradores
+    # first: their fixed paths (/announcements, /notices/me, /consultas/me, /canales/me) must not be
     # read as the {club_id} of the clubs routes.
     app.include_router(postulaciones_router)
     app.include_router(comunicados_router)
     app.include_router(consultas_router)
+    app.include_router(canales_router)
     app.include_router(administradores_router)
     app.include_router(pagos_router)
     app.include_router(convocatorias_router)

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from app.api.dependencies import get_club_admin, get_consulta_athlete, get_consulta_service
 from app.core.security import Actor
 from app.schemas.consulta import (
+    ConsultaIniciada,
     HiloClub,
     HiloDeportista,
     LeidoUpdate,
@@ -104,6 +105,24 @@ def club_threads(
     service: ConsultaService = Depends(get_consulta_service),
 ) -> list[HiloClub]:
     return service.club_threads(actor, club_id)
+
+
+@router.post(
+    "/{club_id}/consultas/postulantes/{usuario_id}/messages",
+    response_model=ConsultaIniciada,
+    status_code=status.HTTP_201_CREATED,
+    summary="Escribirle primero a un postulante",
+    description="Crea la conversación si no existe; idempotente por client_message_id. "
+    "404 si la persona no es postulante activo del club.",
+)
+def club_start(
+    club_id: UUID,
+    usuario_id: UUID,
+    payload: MensajeCreate,
+    actor: Actor = Depends(get_club_admin),
+    service: ConsultaService = Depends(get_consulta_service),
+) -> ConsultaIniciada:
+    return service.start_with_postulante(actor, club_id, usuario_id, payload)
 
 
 @router.get(

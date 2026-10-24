@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -9,22 +12,32 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from app.repositories.base import (
+    AccesoDeportista,
     AccesoHilo,
+    AgregarMiembroResult,
     ApplyResult,
     AsignarResult,
+    CanalEliminado,
+    CanalInactividad,
     ClaimResult,
     ClubSport,
     CreateClubResult,
+    CrearCanalResult,
+    DecisionInactividadResult,
+    HiloEliminado,
     OutboxEvent,
     OutboxMessage,
     ReviewResult,
     StoredAdmin,
     StoredAsignacion,
+    StoredCanal,
     StoredClub,
     StoredComunicado,
     StoredConvocatoria,
     StoredHilo,
     StoredMensaje,
+    StoredMensajeCanal,
+    StoredMiembroCanal,
     StoredPlan,
     StoredPostulacion,
     StoredSuscripcion,
@@ -197,6 +210,32 @@ _ASIGNACION_S_PENDIENTE = "s.aceptada_en IS NULL AND s.revocada_en IS NULL"
 
 _MENSAJE_COLUMNS = "id, hilo_id, autor_id, de, texto, client_message_id, enviado_en"
 
+
+def _postulante_activo(club: str, usuario: str) -> str:
+    """SQL condition (G3): usuario has a postulación other than RECHAZADO to a
+    convocatoria of club. club and usuario are SQL expressions."""
+    return f"""EXISTS (
+        SELECT 1 FROM postulacion_convocatoria pa
+        JOIN convocatoria va ON va.id = pa.convocatoria_id
+        WHERE va.club_id = {club} AND pa.usuario_id = {usuario} AND pa.estado <> 'RECHAZADO')"""
+
+
+# "Nombre A." of a postulación p as the club sees it (its perfil_deportivo);
+# the mock repository's _nombre_perfil is its twin.
+_NOMBRE_PERFIL = r"""COALESCE(NULLIF(btrim(left(btrim(regexp_replace(
+    concat_ws(' ', p.perfil_deportivo->>'nombre', p.perfil_deportivo->>'apellido_inicial'),
+    '\s+', ' ', 'g')), 100)), ''), 'Deportista')"""
+
+# Active postulantes of the club %(club_id)s with the name of their latest
+# active postulación (one row per account).
+_POSTULANTES_ACTIVOS = f"""
+    SELECT DISTINCT ON (p.usuario_id) p.usuario_id, {_NOMBRE_PERFIL} AS nombre
+    FROM postulacion_convocatoria p
+    JOIN convocatoria v ON v.id = p.convocatoria_id
+    WHERE v.club_id = %(club_id)s AND p.estado <> 'RECHAZADO'
+"""
+_POSTULANTES_ORDER = "ORDER BY p.usuario_id, p.fecha_creacion DESC, p.id DESC"
+
 # A thread with its club, its last message (ultimo_* columns) and the unread
 # messages of each side: those written by the other side after its read mark.
 _HILO_SELECT = """
@@ -228,14 +267,17 @@ _HILO_ORDER = "ORDER BY u.id DESC NULLS LAST, h.fecha_creacion DESC, h.id"
 _LEIDO_COLUMN = {"deportista": "leido_deportista_id", "club": "leido_club_id"}
 
 # Whether usuario_id may read the club's thread hilo_id. The club may be inactive.
-_ACCESO_HILO_CLUB = """
+# A thread whose athlete is no longer an active postulante is not shown (G3).
+_ACCESO_HILO_CLUB = f"""
     SELECT
         EXISTS (SELECT 1 FROM club WHERE id = %(club_id)s) AS acceso_club,
         EXISTS (SELECT 1 FROM club_administrador
                 WHERE club_id = %(club_id)s AND usuario_id = %(usuario_id)s) AS acceso_admin,
-        EXISTS (SELECT 1 FROM consulta_hilo
-                WHERE id = %(hilo_id)s AND club_id = %(club_id)s) AS acceso_hilo
+        EXISTS (SELECT 1 FROM consulta_hilo hh
+                WHERE hh.id = %(hilo_id)s AND hh.club_id = %(club_id)s
+                  AND {_postulante_activo('hh.club_id', 'hh.deportista_id')}) AS acceso_hilo
 """
+_HILO_POSTULANTE = _postulante_activo("h.club_id", "h.deportista_id")
 
 _CONVOCATORIA_COLUMNS = frozenset({
     "deporte_id", "titulo", "descripcion", "categoria_edad", "edad_minima", "edad_maxima",
@@ -580,28 +622,51 @@ class PostgresClubRepository:
         )
         return hilos[0] if hilos else None
 
-    def ensure_hilo(self, club_id: UUID, deportista_id: UUID, deportista_nombre: str) -> StoredHilo:
+    def ensure_hilo(
+        self, club_id: UUID, deportista_id: UUID, deportista_nombre: str
+    ) -> StoredHilo | None:
+        params = {"club_id": club_id, "usuario_id": deportista_id, "nombre": deportista_nombre}
+        with self._pool.connection() as conn, conn.transaction():
+            # Serialized with a rejection of the same person in the club.
+            _lock_postulante(conn, club_id, deportista_id)
+            activo = conn.execute(
+                f"SELECT {_postulante_activo('%(club_id)s', '%(usuario_id)s')}", params
+            ).fetchone()[0]
+            if activo:
+                conn.execute(
+                    """
+                    INSERT INTO consulta_hilo (club_id, deportista_id, deportista_nombre)
+                    VALUES (%(club_id)s, %(usuario_id)s, %(nombre)s)
+                    ON CONFLICT (club_id, deportista_id) DO NOTHING
+                    """,
+                    params,
+                )
+        if not activo:
+            return None
+        return self.get_hilo_deportista(club_id, deportista_id)
+
+    def es_postulante_activo(self, club_id: UUID, usuario_id: UUID) -> bool:
         with self._pool.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO consulta_hilo (club_id, deportista_id, deportista_nombre)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (club_id, deportista_id) DO NOTHING
-                """,
-                (club_id, deportista_id, deportista_nombre),
-            )
-        hilo = self.get_hilo_deportista(club_id, deportista_id)
-        assert hilo is not None
-        return hilo
+            return bool(conn.execute(
+                f"SELECT {_postulante_activo('%(club_id)s', '%(usuario_id)s')}",
+                {"club_id": club_id, "usuario_id": usuario_id},
+            ).fetchone()[0])
+
+    def nombre_postulante(self, club_id: UUID, usuario_id: UUID) -> str | None:
+        with self._pool.connection() as conn:
+            return _nombre_postulante(conn, club_id, usuario_id)
 
     def list_hilos_deportista(self, deportista_id: UUID) -> list[StoredHilo]:
         return self._load_hilos(
-            f"{_HILO_SELECT} WHERE h.deportista_id = %s AND c.is_active {_HILO_ORDER}",
+            f"{_HILO_SELECT} WHERE h.deportista_id = %s AND c.is_active AND {_HILO_POSTULANTE} "
+            f"{_HILO_ORDER}",
             (deportista_id,),
         )
 
     def list_hilos_club(self, club_id: UUID) -> list[StoredHilo]:
-        return self._load_hilos(f"{_HILO_SELECT} WHERE h.club_id = %s {_HILO_ORDER}", (club_id,))
+        return self._load_hilos(
+            f"{_HILO_SELECT} WHERE h.club_id = %s AND {_HILO_POSTULANTE} {_HILO_ORDER}", (club_id,)
+        )
 
     def list_mensajes(
         self, hilo_id: UUID, *, after_id: int | None, before_id: int | None, limit: int
@@ -613,6 +678,21 @@ class PostgresClubRepository:
             return [StoredMensaje(**row) for row in cur.fetchall()]
 
     def add_mensaje(
+        self,
+        hilo_id: UUID,
+        autor_id: UUID,
+        de: str,
+        texto: str,
+        client_message_id: UUID,
+        aviso: OutboxMessage,
+    ) -> tuple[StoredMensaje, bool]:
+        try:
+            return self._add_mensaje(hilo_id, autor_id, de, texto, client_message_id, aviso)
+        except errors.ForeignKeyViolation as error:
+            # The thread was deleted (rejected postulación) before the insert.
+            raise HiloEliminado(hilo_id) from error
+
+    def _add_mensaje(
         self,
         hilo_id: UUID,
         autor_id: UUID,
@@ -678,17 +758,21 @@ class PostgresClubRepository:
         after_id: int | None,
         before_id: int | None,
         limit: int,
-    ) -> tuple[bool, UUID | None, list[StoredMensaje]]:
-        # No row: no such active club. One row with m.id NULL: no thread or no messages.
+    ) -> tuple[AccesoDeportista, UUID | None, list[StoredMensaje]]:
+        # No row: no such active club. One row with m.id NULL: not an active
+        # postulante, no thread or no messages.
         query = f"""
             WITH p AS (
-                SELECT (SELECT h.id FROM consulta_hilo h
+                SELECT {_postulante_activo('c.id', '%(deportista_id)s')} AS activo,
+                       (SELECT h.id FROM consulta_hilo h
                         WHERE h.club_id = c.id AND h.deportista_id = %(deportista_id)s) AS ref_hilo
                 FROM club c
                 WHERE c.id = %(club_id)s AND c.is_active
             )
-            SELECT p.ref_hilo, m.*
-            FROM p LEFT JOIN LATERAL ({_pagina_mensajes('p.ref_hilo', after_id)}) m ON true
+            SELECT p.activo, p.ref_hilo, m.*
+            FROM p LEFT JOIN LATERAL (
+                SELECT * FROM ({_pagina_mensajes('p.ref_hilo', after_id)}) pagina WHERE p.activo
+            ) m ON true
             ORDER BY m.id
         """
         params = {
@@ -699,8 +783,10 @@ class PostgresClubRepository:
             cur.execute(query, params)
             rows = cur.fetchall()
         if not rows:
-            return False, None, []
-        return True, rows[0]["ref_hilo"], _mensajes(rows)
+            return "sin_club", None, []
+        if not rows[0]["activo"]:
+            return "no_postulante", None, []
+        return "ok", rows[0]["ref_hilo"], _mensajes(rows)
 
     def mensajes_club(
         self,
@@ -731,21 +817,34 @@ class PostgresClubRepository:
         acceso = _acceso(rows[0])
         return acceso, _mensajes(rows) if acceso == "ok" else []
 
-    def mark_read_deportista(self, club_id: UUID, deportista_id: UUID, hasta_id: int) -> bool:
+    def mark_read_deportista(
+        self, club_id: UUID, deportista_id: UUID, hasta_id: int
+    ) -> AccesoDeportista:
+        # (SELECT activo FROM c) is NULL when there is no such active club.
         query = sql.SQL(
             """
-            WITH c AS (SELECT id FROM club WHERE id = %(club_id)s AND is_active),
+            WITH c AS (
+                SELECT cl.id, {activo} AS activo FROM club cl
+                WHERE cl.id = %(club_id)s AND cl.is_active
+            ),
             u AS (
                 UPDATE consulta_hilo h SET {set}
                 FROM c
-                WHERE h.club_id = c.id AND h.deportista_id = %(deportista_id)s AND {avanza}
+                WHERE c.activo AND h.club_id = c.id AND h.deportista_id = %(deportista_id)s
+                  AND {avanza}
             )
-            SELECT EXISTS (SELECT 1 FROM c)
+            SELECT (SELECT activo FROM c)
             """
-        ).format(**_leido_sql("deportista"))
+        ).format(
+            activo=sql.SQL(_postulante_activo("cl.id", "%(deportista_id)s")),
+            **_leido_sql("deportista"),
+        )
         params = {"club_id": club_id, "deportista_id": deportista_id, "hasta_id": hasta_id}
         with self._pool.connection() as conn:
-            return bool(conn.execute(query, params).fetchone()[0])
+            activo = conn.execute(query, params).fetchone()[0]
+        if activo is None:
+            return "sin_club"
+        return "ok" if activo else "no_postulante"
 
     def mark_read_club(
         self, club_id: UUID, usuario_id: UUID, hilo_id: UUID, hasta_id: int
@@ -774,6 +873,474 @@ class PostgresClubRepository:
             cur.execute(query, params)
             return [_to_hilo(row) for row in cur.fetchall()]
 
+    # -- canales del club (G4) ----------------------------------------------------------
+
+    def list_canales_club(self, club_id: UUID) -> list[StoredCanal]:
+        return self._load_canales(
+            f"{_canal_select('club')} WHERE k.club_id = %(club_id)s {_CANAL_ORDER}",
+            {"club_id": club_id},
+        )
+
+    def get_canal_club(self, club_id: UUID, canal_id: UUID) -> StoredCanal | None:
+        canales = self._load_canales(
+            f"{_canal_select('club')} WHERE k.id = %(canal_id)s AND k.club_id = %(club_id)s",
+            {"club_id": club_id, "canal_id": canal_id},
+        )
+        return canales[0] if canales else None
+
+    def create_canal(
+        self,
+        club_id: UUID,
+        nombre: str,
+        miembros_escriben: bool,
+        *,
+        max_canales: int,
+        max_miembros: int,
+    ) -> tuple[CrearCanalResult, StoredCanal | None]:
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"club-canales:{club_id}",)
+            )
+            total = conn.execute(
+                "SELECT count(*) FROM club_canal WHERE club_id = %s", (club_id,)
+            ).fetchone()[0]
+            if total >= max_canales:
+                return "sin_cupo", None
+            canal_id = conn.execute(
+                """
+                INSERT INTO club_canal (club_id, nombre, miembros_escriben)
+                VALUES (%s, %s, %s) RETURNING id
+                """,
+                (club_id, nombre, miembros_escriben),
+            ).fetchone()[0]
+            # The athletes with an ACEPTADO postulación in the club.
+            conn.execute(
+                f"""
+                INSERT INTO club_canal_miembro (canal_id, usuario_id, nombre)
+                SELECT %(canal_id)s, a.usuario_id, a.nombre
+                FROM (
+                    {_POSTULANTES_ACTIVOS}
+                      AND EXISTS (
+                        SELECT 1 FROM postulacion_convocatoria p2
+                        JOIN convocatoria v2 ON v2.id = p2.convocatoria_id
+                        WHERE v2.club_id = v.club_id AND p2.usuario_id = p.usuario_id
+                          AND p2.estado = 'ACEPTADO')
+                    {_POSTULANTES_ORDER}
+                ) a
+                ORDER BY a.usuario_id
+                LIMIT %(max_miembros)s
+                """,
+                {"canal_id": canal_id, "club_id": club_id, "max_miembros": max_miembros},
+            )
+        return "creado", self.get_canal_club(club_id, canal_id)
+
+    def update_canal(
+        self, club_id: UUID, canal_id: UUID, changes: dict[str, Any]
+    ) -> StoredCanal | None:
+        values = {k: v for k, v in changes.items() if k in ("nombre", "miembros_escriben")}
+        if not values:
+            return self.get_canal_club(club_id, canal_id)
+        query = sql.SQL(
+            "UPDATE club_canal SET {} WHERE id = %(canal_id)s AND club_id = %(club_id)s RETURNING id"
+        ).format(
+            sql.SQL(", ").join(
+                sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder(k)) for k in values
+            )
+        )
+        with self._pool.connection() as conn:
+            updated = conn.execute(
+                query, {**values, "canal_id": canal_id, "club_id": club_id}
+            ).fetchone()
+        return self.get_canal_club(club_id, canal_id) if updated else None
+
+    def delete_canal(self, club_id: UUID, canal_id: UUID) -> bool:
+        with self._pool.connection() as conn:
+            return conn.execute(
+                "DELETE FROM club_canal WHERE id = %s AND club_id = %s RETURNING id",
+                (canal_id, club_id),
+            ).fetchone() is not None
+
+    def list_miembros_canal(
+        self, club_id: UUID, canal_id: UUID
+    ) -> list[StoredMiembroCanal] | None:
+        query = """
+            SELECT k.id AS canal, cm.usuario_id, cm.nombre, cm.agregado_en
+            FROM club_canal k
+            LEFT JOIN club_canal_miembro cm ON cm.canal_id = k.id
+            WHERE k.id = %s AND k.club_id = %s
+        """
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, (canal_id, club_id))
+            rows = cur.fetchall()
+        if not rows:
+            return None
+        return _miembros_canal(rows)
+
+    def list_candidatos_canal(
+        self, club_id: UUID, canal_id: UUID
+    ) -> list[StoredMiembroCanal] | None:
+        query = f"""
+            SELECT k.id AS canal, a.usuario_id, a.nombre, NULL::timestamptz AS agregado_en
+            FROM club_canal k
+            LEFT JOIN LATERAL (
+                {_POSTULANTES_ACTIVOS}
+                  AND NOT EXISTS (
+                    SELECT 1 FROM club_canal_miembro cm
+                    WHERE cm.canal_id = k.id AND cm.usuario_id = p.usuario_id)
+                {_POSTULANTES_ORDER}
+            ) a ON true
+            WHERE k.id = %(canal_id)s AND k.club_id = %(club_id)s
+        """
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, {"canal_id": canal_id, "club_id": club_id})
+            rows = cur.fetchall()
+        if not rows:
+            return None
+        return _miembros_canal(rows)
+
+    def add_miembro_canal(
+        self, club_id: UUID, canal_id: UUID, usuario_id: UUID, *, max_miembros: int
+    ) -> AgregarMiembroResult:
+        with self._pool.connection() as conn, conn.transaction():
+            # Serializes the member count of the channel (NO KEY: messages keep flowing).
+            canal = conn.execute(
+                "SELECT id FROM club_canal WHERE id = %s AND club_id = %s FOR NO KEY UPDATE",
+                (canal_id, club_id),
+            ).fetchone()
+            if canal is None:
+                return "sin_canal"
+            _lock_postulante(conn, club_id, usuario_id)
+            nombre = _nombre_postulante(conn, club_id, usuario_id)
+            if nombre is None:
+                return "no_postulante"
+            if conn.execute(
+                "SELECT 1 FROM club_canal_miembro WHERE canal_id = %s AND usuario_id = %s",
+                (canal_id, usuario_id),
+            ).fetchone():
+                return "ya_estaba"
+            total = conn.execute(
+                "SELECT count(*) FROM club_canal_miembro WHERE canal_id = %s", (canal_id,)
+            ).fetchone()[0]
+            if total >= max_miembros:
+                return "sin_cupo"
+            conn.execute(
+                "INSERT INTO club_canal_miembro (canal_id, usuario_id, nombre) VALUES (%s, %s, %s)",
+                (canal_id, usuario_id, nombre),
+            )
+        return "agregado"
+
+    def remove_miembro_canal(self, club_id: UUID, canal_id: UUID, usuario_id: UUID) -> bool:
+        query = """
+            WITH k AS (SELECT id FROM club_canal WHERE id = %(canal_id)s AND club_id = %(club_id)s),
+            d AS (
+                DELETE FROM club_canal_miembro cm USING k
+                WHERE cm.canal_id = k.id AND cm.usuario_id = %(usuario_id)s
+            )
+            SELECT EXISTS (SELECT 1 FROM k)
+        """
+        params = {"canal_id": canal_id, "club_id": club_id, "usuario_id": usuario_id}
+        with self._pool.connection() as conn:
+            return bool(conn.execute(query, params).fetchone()[0])
+
+    def add_mensaje_canal(
+        self,
+        canal_id: UUID,
+        autor_id: UUID,
+        de: str,
+        autor_nombre: str | None,
+        texto: str,
+        client_message_id: UUID,
+        aviso: OutboxMessage,
+    ) -> tuple[StoredMensajeCanal, bool]:
+        try:
+            return self._add_mensaje_canal(
+                canal_id, autor_id, de, autor_nombre, texto, client_message_id, aviso
+            )
+        except errors.ForeignKeyViolation as error:
+            raise CanalEliminado(canal_id) from error
+
+    def _add_mensaje_canal(
+        self,
+        canal_id: UUID,
+        autor_id: UUID,
+        de: str,
+        autor_nombre: str | None,
+        texto: str,
+        client_message_id: UUID,
+        aviso: OutboxMessage,
+    ) -> tuple[StoredMensajeCanal, bool]:
+        with self._pool.connection() as conn, conn.transaction():
+            nuevo = conn.execute(
+                """
+                INSERT INTO club_canal_mensaje
+                    (canal_id, autor_id, de, autor_nombre, texto, client_message_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (canal_id, autor_id, client_message_id) DO NOTHING
+                RETURNING id
+                """,
+                (canal_id, autor_id, de, None if de == "club" else autor_nombre, texto,
+                 client_message_id),
+            ).fetchone()
+            if nuevo is not None:
+                # A message cancels a pending inactivity notice and the kept period.
+                conn.execute(
+                    """
+                    UPDATE club_canal
+                    SET ultima_actividad = now(), aviso_inactividad_en = NULL, mantener_hasta = NULL
+                    WHERE id = %s
+                    """,
+                    (canal_id,),
+                )
+                conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {} (user_id, kind, title, body, data) "
+                        "SELECT cm.usuario_id, %s, %s, %s, %s FROM club_canal_miembro cm "
+                        "WHERE cm.canal_id = %s AND NOT cm.silenciado AND cm.usuario_id <> %s "
+                        "ORDER BY cm.usuario_id"
+                    ).format(_OUTBOX),
+                    (aviso.kind, aviso.title, aviso.body, Jsonb(aviso.data), canal_id, autor_id),
+                )
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    f"""
+                    {_MENSAJE_CANAL_SELECT}
+                    WHERE m.canal_id = %(canal_id)s AND m.autor_id = %(autor_id)s
+                      AND m.client_message_id = %(client_message_id)s
+                    """,
+                    {"canal_id": canal_id, "autor_id": autor_id,
+                     "client_message_id": client_message_id},
+                )
+                row = cur.fetchone()
+        return _mensaje_canal(row), nuevo is not None
+
+    def decidir_inactividad(
+        self, club_id: UUID, canal_id: UUID, decision: str, mantener_hasta: datetime
+    ) -> DecisionInactividadResult:
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                """
+                SELECT aviso_inactividad_en FROM club_canal
+                WHERE id = %s AND club_id = %s FOR UPDATE
+                """,
+                (canal_id, club_id),
+            ).fetchone()
+            if row is None:
+                return "sin_canal"
+            if row[0] is None:
+                return "sin_aviso"
+            if decision == "eliminar":
+                conn.execute("DELETE FROM club_canal WHERE id = %s", (canal_id,))
+                return "eliminado"
+            conn.execute(
+                """
+                UPDATE club_canal SET aviso_inactividad_en = NULL, mantener_hasta = %s
+                WHERE id = %s
+                """,
+                (mantener_hasta, canal_id),
+            )
+        return "mantenido"
+
+    # Polling paths of channels (sección F): each is a single statement.
+
+    def mensajes_canal_club(
+        self,
+        club_id: UUID,
+        usuario_id: UUID,
+        canal_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[StoredCanal | None, list[StoredMensajeCanal]]:
+        where = """
+            WHERE k.id = %(canal_id)s AND k.club_id = %(club_id)s
+              AND EXISTS (SELECT 1 FROM club_administrador a
+                          WHERE a.club_id = k.club_id AND a.usuario_id = %(usuario_id)s)
+        """
+        params = {
+            "club_id": club_id, "usuario_id": usuario_id, "canal_id": canal_id,
+            "after_id": after_id, "before_id": before_id, "limit": limit,
+        }
+        return self._canal_con_mensajes(f"{_canal_select('club')} {where}", after_id, params)
+
+    def mark_read_canal_club(
+        self, club_id: UUID, usuario_id: UUID, canal_id: UUID, hasta_id: int
+    ) -> bool:
+        query = f"""
+            WITH a AS (
+                SELECT k.id FROM club_canal k
+                WHERE k.id = %(canal_id)s AND k.club_id = %(club_id)s
+                  AND EXISTS (SELECT 1 FROM club_administrador ad
+                              WHERE ad.club_id = k.club_id AND ad.usuario_id = %(usuario_id)s)
+            ),
+            u AS (
+                UPDATE club_canal k SET leido_club_id = {_leido_canal('k.leido_club_id', 'k.id')}
+                FROM a
+                WHERE k.id = a.id AND k.leido_club_id < %(hasta_id)s
+            )
+            SELECT EXISTS (SELECT 1 FROM a)
+        """
+        params = {
+            "club_id": club_id, "usuario_id": usuario_id, "canal_id": canal_id, "hasta_id": hasta_id,
+        }
+        with self._pool.connection() as conn:
+            return bool(conn.execute(query, params).fetchone()[0])
+
+    def list_canales_deportista(self, usuario_id: UUID) -> list[StoredCanal]:
+        return self._load_canales(
+            f"{_canal_select('miembro')} WHERE c.is_active {_CANAL_ORDER}",
+            {"usuario_id": usuario_id},
+        )
+
+    def get_canal_deportista(self, canal_id: UUID, usuario_id: UUID) -> StoredCanal | None:
+        canales = self._load_canales(
+            f"{_canal_select('miembro')} WHERE k.id = %(canal_id)s AND c.is_active",
+            {"usuario_id": usuario_id, "canal_id": canal_id},
+        )
+        return canales[0] if canales else None
+
+    def mensajes_canal_deportista(
+        self,
+        canal_id: UUID,
+        usuario_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[StoredCanal | None, list[StoredMensajeCanal]]:
+        params = {
+            "usuario_id": usuario_id, "canal_id": canal_id,
+            "after_id": after_id, "before_id": before_id, "limit": limit,
+        }
+        return self._canal_con_mensajes(
+            f"{_canal_select('miembro')} WHERE k.id = %(canal_id)s AND c.is_active", after_id, params
+        )
+
+    def mark_read_canal_deportista(self, canal_id: UUID, usuario_id: UUID, hasta_id: int) -> bool:
+        query = f"""
+            WITH a AS (
+                SELECT cm.canal_id FROM club_canal_miembro cm
+                JOIN club_canal k ON k.id = cm.canal_id
+                JOIN club c ON c.id = k.club_id
+                WHERE cm.canal_id = %(canal_id)s AND cm.usuario_id = %(usuario_id)s AND c.is_active
+            ),
+            u AS (
+                UPDATE club_canal_miembro cm
+                SET leido_id = {_leido_canal('cm.leido_id', 'cm.canal_id')}
+                FROM a
+                WHERE cm.canal_id = a.canal_id AND cm.usuario_id = %(usuario_id)s
+                  AND cm.leido_id < %(hasta_id)s
+            )
+            SELECT EXISTS (SELECT 1 FROM a)
+        """
+        params = {"canal_id": canal_id, "usuario_id": usuario_id, "hasta_id": hasta_id}
+        with self._pool.connection() as conn:
+            return bool(conn.execute(query, params).fetchone()[0])
+
+    def set_silencio_canal(self, canal_id: UUID, usuario_id: UUID, silenciado: bool) -> bool:
+        query = """
+            UPDATE club_canal_miembro cm SET silenciado = %(silenciado)s
+            FROM club_canal k JOIN club c ON c.id = k.club_id
+            WHERE k.id = cm.canal_id AND c.is_active
+              AND cm.canal_id = %(canal_id)s AND cm.usuario_id = %(usuario_id)s
+            RETURNING 1
+        """
+        params = {"canal_id": canal_id, "usuario_id": usuario_id, "silenciado": silenciado}
+        with self._pool.connection() as conn:
+            return conn.execute(query, params).fetchone() is not None
+
+    # Hourly inactivity check (G4).
+
+    @contextmanager
+    def inactividad_lock(self) -> Iterator[bool]:
+        """Session-level advisory lock on its own connection, released at the end."""
+        with self._pool.connection() as conn:
+            obtenido = bool(
+                conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (_INACTIVIDAD_LOCK,)).fetchone()[0]
+            )
+            conn.commit()  # the session lock stays; no transaction is left open
+            try:
+                yield obtenido
+            finally:
+                if obtenido:
+                    conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (_INACTIVIDAD_LOCK,))
+                    conn.commit()
+
+    def canales_por_revisar(self, inactivo_desde: datetime) -> list[CanalInactividad]:
+        query = """
+            SELECT id, club_id, nombre, ultima_actividad, aviso_inactividad_en, mantener_hasta
+            FROM club_canal
+            WHERE aviso_inactividad_en IS NOT NULL OR ultima_actividad <= %s
+            ORDER BY ultima_actividad, id
+        """
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, (inactivo_desde,))
+            return [CanalInactividad(**row) for row in cur.fetchall()]
+
+    def avisar_inactividad(
+        self, canal: CanalInactividad, ahora: datetime, aviso: OutboxMessage
+    ) -> bool:
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                """
+                UPDATE club_canal SET aviso_inactividad_en = %(ahora)s
+                WHERE id = %(id)s AND aviso_inactividad_en IS NULL
+                  AND ultima_actividad = %(ultima_actividad)s
+                  AND mantener_hasta IS NOT DISTINCT FROM %(mantener_hasta)s
+                RETURNING club_id
+                """,
+                {
+                    "ahora": ahora, "id": canal.id, "ultima_actividad": canal.ultima_actividad,
+                    "mantener_hasta": canal.mantener_hasta,
+                },
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                sql.SQL(
+                    "INSERT INTO {} (user_id, kind, title, body, data) "
+                    "SELECT a.usuario_id, %s, %s, %s, %s FROM club_administrador a "
+                    "WHERE a.club_id = %s ORDER BY a.usuario_id"
+                ).format(_OUTBOX),
+                (aviso.kind, aviso.title, aviso.body, Jsonb(aviso.data), row[0]),
+            )
+        return True
+
+    def eliminar_canal_inactivo(self, canal: CanalInactividad) -> bool:
+        if canal.aviso_inactividad_en is None:
+            return False
+        with self._pool.connection() as conn:
+            return conn.execute(
+                "DELETE FROM club_canal WHERE id = %s AND aviso_inactividad_en = %s RETURNING id",
+                (canal.id, canal.aviso_inactividad_en),
+            ).fetchone() is not None
+
+    def _load_canales(self, query: str, params: Any) -> list[StoredCanal]:
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            return [_to_canal(row) for row in cur.fetchall()]
+
+    def _canal_con_mensajes(
+        self, canal_query: str, after_id: int | None, params: dict[str, Any]
+    ) -> tuple[StoredCanal | None, list[StoredMensajeCanal]]:
+        """The channel row (canal_query) and a page of its messages, in one statement."""
+        query = f"""
+            WITH canal AS ({canal_query})
+            SELECT canal.*, pm.*
+            FROM canal LEFT JOIN LATERAL ({_pagina_canal('canal.id', after_id)}) pm ON true
+            ORDER BY pm.pm_id
+        """
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(query, params)
+            rows = cur.fetchall()
+        if not rows:
+            return None, []
+        mensajes = [
+            _mensaje_canal({k[3:]: v for k, v in row.items() if k.startswith("pm_")})
+            for row in rows if row["pm_id"] is not None
+        ]
+        canal = _to_canal({k: v for k, v in rows[0].items() if not k.startswith("pm_")})
+        return canal, mensajes
 
     # -- convocatorias (HU-32) --------------------------------------------------
 
@@ -1004,13 +1571,14 @@ class PostgresClubRepository:
             ).fetchone()[0]
             # Same lock order as applying (convocatoria, then postulación): the
             # cupos check below cannot race with a new application.
-            cupos = conn.execute(
-                "SELECT cupos FROM convocatoria WHERE id = %s FOR UPDATE", (convocatoria_id,)
-            ).fetchone()[0]
-            anterior = conn.execute(
-                "SELECT estado FROM postulacion_convocatoria WHERE id = %s FOR UPDATE",
+            cupos, club_id = conn.execute(
+                "SELECT cupos, club_id FROM convocatoria WHERE id = %s FOR UPDATE",
+                (convocatoria_id,),
+            ).fetchone()
+            anterior, usuario_id = conn.execute(
+                "SELECT estado, usuario_id FROM postulacion_convocatoria WHERE id = %s FOR UPDATE",
                 (postulacion_id,),
-            ).fetchone()[0]
+            ).fetchone()
             sin_cupos = False
             if anterior == "RECHAZADO" and estado != "RECHAZADO":
                 taken = conn.execute(
@@ -1036,6 +1604,8 @@ class PostgresClubRepository:
                     (estado, set_comentario, comentario, postulacion_id),
                 )
                 result = "sin_cambios" if estado == anterior else "actualizada"
+                if estado == "RECHAZADO":
+                    _sin_postulacion_activa(conn, club_id, usuario_id)
             if result == "actualizada":
                 conn.execute(
                     sql.SQL(
@@ -1318,6 +1888,165 @@ def _lock_account(conn: Any, usuario_id: UUID) -> None:
     the one-club-per-account check holds (the unique usuario_id backs it)."""
     conn.execute(
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"club-admin:{usuario_id}",)
+    )
+
+
+# -- canales del club (G4) ------------------------------------------------------------
+
+# Only one instance runs the hourly inactivity check at a time.
+_INACTIVIDAD_LOCK = "sportmatch-clubs-canales-inactividad"
+
+# The author shown for a channel message: the club's current name when the
+# club wrote it, the member's name snapshot otherwise. mc is the club.
+_AUTOR_CANAL = (
+    "CASE WHEN m.de = 'club' THEN mc.nombre ELSE COALESCE(m.autor_nombre, 'Deportista') END"
+)
+_MENSAJE_CANAL_COLUMNS = (
+    "id", "canal_id", "autor_id", "de", "autor_nombre", "texto", "client_message_id", "enviado_en",
+)
+_MENSAJE_CANAL_FROM = """
+    FROM club_canal_mensaje m
+    JOIN club_canal mk ON mk.id = m.canal_id
+    JOIN club mc ON mc.id = mk.club_id
+"""
+
+
+def _mensaje_canal_columns(prefix: str) -> str:
+    return ", ".join(
+        f"{_AUTOR_CANAL if column == 'autor_nombre' else 'm.' + column} AS {prefix}{column}"
+        for column in _MENSAJE_CANAL_COLUMNS
+    )
+
+
+_MENSAJE_CANAL_SELECT = f"SELECT {_mensaje_canal_columns('')} {_MENSAJE_CANAL_FROM}"
+
+_CANAL_ORDER = "ORDER BY k.ultima_actividad DESC, k.id DESC"
+
+
+def _canal_select(vista: str) -> str:
+    """A channel k with its club c, member count, last message (ultimo_*
+    columns) and unread count, as the club sees it (vista club) or as the
+    member %(usuario_id)s sees it (vista miembro; only their channels)."""
+    if vista == "club":
+        miembro = ""
+        no_leidos = "mn.de = 'deportista' AND mn.id > k.leido_club_id"
+        silenciado = "false"
+    else:
+        miembro = (
+            "JOIN club_canal_miembro me ON me.canal_id = k.id AND me.usuario_id = %(usuario_id)s"
+        )
+        no_leidos = "mn.autor_id <> me.usuario_id AND mn.id > me.leido_id"
+        silenciado = "me.silenciado"
+    ultimo = ", ".join(f"u.{column} AS ultimo_{column}" for column in _MENSAJE_CANAL_COLUMNS)
+    return f"""
+        SELECT k.id, k.club_id, c.nombre AS club_nombre, c.logo AS club_logo, k.nombre,
+               k.miembros_escriben, k.fecha_creacion, k.ultima_actividad,
+               k.aviso_inactividad_en, k.mantener_hasta,
+               (SELECT count(*) FROM club_canal_miembro cmc WHERE cmc.canal_id = k.id) AS miembros,
+               (SELECT count(*) FROM club_canal_mensaje mn
+                WHERE mn.canal_id = k.id AND {no_leidos}) AS no_leidos,
+               {silenciado} AS silenciado,
+               {ultimo}
+        FROM club_canal k
+        JOIN club c ON c.id = k.club_id
+        {miembro}
+        LEFT JOIN LATERAL (
+            SELECT {_mensaje_canal_columns('')} {_MENSAJE_CANAL_FROM}
+            WHERE m.canal_id = k.id
+            ORDER BY m.id DESC
+            LIMIT 1
+        ) u ON true
+    """
+
+
+def _pagina_canal(canal: str, after_id: int | None) -> str:
+    """Like _pagina_mensajes for the channel canal (an SQL expression), with
+    every column prefixed pm_ so it can sit next to the channel's columns."""
+    order = "m.id" if after_id is not None else "m.id DESC"
+    return f"""
+        SELECT {_mensaje_canal_columns('pm_')} {_MENSAJE_CANAL_FROM}
+        WHERE m.canal_id = {canal}
+          AND (%(after_id)s::bigint IS NULL OR m.id > %(after_id)s)
+          AND (%(before_id)s::bigint IS NULL OR m.id < %(before_id)s)
+        ORDER BY {order}
+        LIMIT %(limit)s
+    """
+
+
+def _leido_canal(column: str, canal: str) -> str:
+    """A read mark moved to %(hasta_id)s: never back, never past the channel's last message."""
+    return (
+        f"GREATEST({column}, LEAST(%(hasta_id)s, COALESCE("
+        f"(SELECT max(mm.id) FROM club_canal_mensaje mm WHERE mm.canal_id = {canal}), 0)))"
+    )
+
+
+def _mensaje_canal(row: dict[str, Any]) -> StoredMensajeCanal:
+    return StoredMensajeCanal(**{column: row[column] for column in _MENSAJE_CANAL_COLUMNS})
+
+
+def _to_canal(row: dict[str, Any]) -> StoredCanal:
+    ultimo = {column: row.pop(f"ultimo_{column}") for column in _MENSAJE_CANAL_COLUMNS}
+    mensaje = _mensaje_canal(ultimo) if ultimo["id"] is not None else None
+    return StoredCanal(**row, ultimo=mensaje)
+
+
+def _miembros_canal(rows: list[dict[str, Any]]) -> list[StoredMiembroCanal]:
+    """Members or candidates of a channel query's rows (usuario_id NULL: none), by name."""
+    miembros = [
+        StoredMiembroCanal(
+            usuario_id=row["usuario_id"], nombre=row["nombre"], agregado_en=row["agregado_en"]
+        )
+        for row in rows if row["usuario_id"] is not None
+    ]
+    return sorted(miembros, key=lambda m: (m.nombre.lower(), str(m.usuario_id)))
+
+
+def _lock_postulante(conn: Any, club_id: UUID, usuario_id: UUID) -> None:
+    """Serializes a rejection with creating that person's thread or channel
+    membership in the club, so neither survives a rejection (G3)."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"club-postulante:{club_id}:{usuario_id}",),
+    )
+
+
+def _nombre_postulante(conn: Any, club_id: UUID, usuario_id: UUID) -> str | None:
+    row = conn.execute(
+        f"""
+        SELECT {_NOMBRE_PERFIL}
+        FROM postulacion_convocatoria p
+        JOIN convocatoria v ON v.id = p.convocatoria_id
+        WHERE v.club_id = %s AND p.usuario_id = %s AND p.estado <> 'RECHAZADO'
+        ORDER BY p.fecha_creacion DESC, p.id DESC
+        LIMIT 1
+        """,
+        (club_id, usuario_id),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _sin_postulacion_activa(conn: Any, club_id: UUID, usuario_id: UUID) -> None:
+    """G3, inside the rejection's transaction: without another active
+    postulación in the club, delete the person's consulta thread (its
+    messages go by ON DELETE CASCADE) and their channel memberships."""
+    _lock_postulante(conn, club_id, usuario_id)
+    params = {"club_id": club_id, "usuario_id": usuario_id}
+    if conn.execute(
+        f"SELECT {_postulante_activo('%(club_id)s', '%(usuario_id)s')}", params
+    ).fetchone()[0]:
+        return
+    conn.execute(
+        "DELETE FROM consulta_hilo WHERE club_id = %(club_id)s AND deportista_id = %(usuario_id)s",
+        params,
+    )
+    conn.execute(
+        """
+        DELETE FROM club_canal_miembro cm
+        USING club_canal k
+        WHERE k.id = cm.canal_id AND k.club_id = %(club_id)s AND cm.usuario_id = %(usuario_id)s
+        """,
+        params,
     )
 
 

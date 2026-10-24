@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -9,22 +10,32 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from app.repositories.base import (
+    AccesoDeportista,
     AccesoHilo,
+    AgregarMiembroResult,
     ApplyResult,
     AsignarResult,
+    CanalEliminado,
+    CanalInactividad,
     ClaimResult,
     ClubSport,
     CreateClubResult,
+    CrearCanalResult,
+    DecisionInactividadResult,
+    HiloEliminado,
     OutboxEvent,
     OutboxMessage,
     ReviewResult,
     StoredAdmin,
     StoredAsignacion,
+    StoredCanal,
     StoredClub,
     StoredComunicado,
     StoredConvocatoria,
     StoredHilo,
     StoredMensaje,
+    StoredMensajeCanal,
+    StoredMiembroCanal,
     StoredPlan,
     StoredPostulacion,
     StoredSuscripcion,
@@ -69,6 +80,12 @@ class MockClubRepository:
         self._asignaciones: dict[UUID, StoredAsignacion] = {}
         self._hilos: dict[UUID, dict[str, Any]] = {}
         self._mensajes: list[StoredMensaje] = []
+        # Identity columns: ids are never reused, even after deletes.
+        self._ultimo_mensaje_id = 0
+        self._canales: dict[UUID, dict[str, Any]] = {}
+        self._miembros: dict[tuple[UUID, UUID], dict[str, Any]] = {}
+        self._mensajes_canal: list[StoredMensajeCanal] = []
+        self._ultimo_mensaje_canal_id = 0
         for club in clubs or []:
             self.add_club(club)
 
@@ -276,7 +293,11 @@ class MockClubRepository:
                 return self._stored_hilo(row)
         return None
 
-    def ensure_hilo(self, club_id: UUID, deportista_id: UUID, deportista_nombre: str) -> StoredHilo:
+    def ensure_hilo(
+        self, club_id: UUID, deportista_id: UUID, deportista_nombre: str
+    ) -> StoredHilo | None:
+        if not self.es_postulante_activo(club_id, deportista_id):
+            return None
         hilo = self.get_hilo_deportista(club_id, deportista_id)
         if hilo is not None:
             return hilo
@@ -288,14 +309,46 @@ class MockClubRepository:
         self._hilos[row["id"]] = row
         return self._stored_hilo(row)
 
+    def es_postulante_activo(self, club_id: UUID, usuario_id: UUID) -> bool:
+        return bool(self._postulaciones_activas(club_id, usuario_id))
+
+    def nombre_postulante(self, club_id: UUID, usuario_id: UUID) -> str | None:
+        activas = self._postulaciones_activas(club_id, usuario_id)
+        return _nombre_perfil(activas[0]["perfil_deportivo"]) if activas else None
+
+    def _postulaciones_activas(self, club_id: UUID, usuario_id: UUID) -> list[dict[str, Any]]:
+        """The account's postulaciones other than RECHAZADO in the club, newest first."""
+        return sorted(
+            (
+                p for p in self._postulaciones.values()
+                if p["usuario_id"] == usuario_id and p["estado"] != "RECHAZADO"
+                and self._convocatorias[p["convocatoria_id"]]["club_id"] == club_id
+            ),
+            key=lambda p: (p["fecha_creacion"], str(p["id"])),
+            reverse=True,
+        )
+
+    def _postulantes_activos(self, club_id: UUID) -> dict[UUID, str]:
+        """Every active postulante of the club with their name."""
+        usuarios = {
+            p["usuario_id"] for p in self._postulaciones.values()
+            if p["estado"] != "RECHAZADO"
+            and self._convocatorias[p["convocatoria_id"]]["club_id"] == club_id
+        }
+        return {u: self.nombre_postulante(club_id, u) or "Deportista" for u in usuarios}
+
     def list_hilos_deportista(self, deportista_id: UUID) -> list[StoredHilo]:
         return self._sorted_hilos(
             row for row in self._hilos.values()
             if row["deportista_id"] == deportista_id and self._clubs[row["club_id"]].is_active
+            and self.es_postulante_activo(row["club_id"], deportista_id)
         )
 
     def list_hilos_club(self, club_id: UUID) -> list[StoredHilo]:
-        return self._sorted_hilos(row for row in self._hilos.values() if row["club_id"] == club_id)
+        return self._sorted_hilos(
+            row for row in self._hilos.values()
+            if row["club_id"] == club_id and self.es_postulante_activo(club_id, row["deportista_id"])
+        )
 
     def list_mensajes(
         self, hilo_id: UUID, *, after_id: int | None, before_id: int | None, limit: int
@@ -317,12 +370,15 @@ class MockClubRepository:
         client_message_id: UUID,
         aviso: OutboxMessage,
     ) -> tuple[StoredMensaje, bool]:
+        if hilo_id not in self._hilos:
+            raise HiloEliminado(hilo_id)
         clave = (hilo_id, autor_id, client_message_id)
         for mensaje in self._mensajes:
             if (mensaje.hilo_id, mensaje.autor_id, mensaje.client_message_id) == clave:
                 return mensaje, False
+        self._ultimo_mensaje_id += 1
         mensaje = StoredMensaje(
-            id=len(self._mensajes) + 1, hilo_id=hilo_id, autor_id=autor_id, de=de, texto=texto,
+            id=self._ultimo_mensaje_id, hilo_id=hilo_id, autor_id=autor_id, de=de, texto=texto,
             client_message_id=client_message_id, enviado_en=self._tick(),
         )
         self._mensajes.append(mensaje)
@@ -354,14 +410,15 @@ class MockClubRepository:
         after_id: int | None,
         before_id: int | None,
         limit: int,
-    ) -> tuple[bool, UUID | None, list[StoredMensaje]]:
-        if self.get_club(club_id) is None:
-            return False, None, []
+    ) -> tuple[AccesoDeportista, UUID | None, list[StoredMensaje]]:
+        acceso = self._acceso_deportista(club_id, deportista_id)
+        if acceso != "ok":
+            return acceso, None, []
         hilo_id = self._hilo_id(club_id, deportista_id)
         if hilo_id is None:
-            return True, None, []
+            return acceso, None, []
         mensajes = self.list_mensajes(hilo_id, after_id=after_id, before_id=before_id, limit=limit)
-        return True, hilo_id, mensajes
+        return acceso, hilo_id, mensajes
 
     def mensajes_club(
         self,
@@ -380,13 +437,19 @@ class MockClubRepository:
             hilo_id, after_id=after_id, before_id=before_id, limit=limit
         )
 
-    def mark_read_deportista(self, club_id: UUID, deportista_id: UUID, hasta_id: int) -> bool:
-        if self.get_club(club_id) is None:
-            return False
+    def mark_read_deportista(
+        self, club_id: UUID, deportista_id: UUID, hasta_id: int
+    ) -> AccesoDeportista:
+        acceso = self._acceso_deportista(club_id, deportista_id)
         hilo_id = self._hilo_id(club_id, deportista_id)
-        if hilo_id is not None:
+        if acceso == "ok" and hilo_id is not None:
             self.mark_read(hilo_id, "deportista", hasta_id)
-        return True
+        return acceso
+
+    def _acceso_deportista(self, club_id: UUID, deportista_id: UUID) -> AccesoDeportista:
+        if self.get_club(club_id) is None:
+            return "sin_club"
+        return "ok" if self.es_postulante_activo(club_id, deportista_id) else "no_postulante"
 
     def mark_read_club(
         self, club_id: UUID, usuario_id: UUID, hilo_id: UUID, hasta_id: int
@@ -408,7 +471,11 @@ class MockClubRepository:
         if self.get_admin(club_id, usuario_id) is None:
             return "no_admin"
         row = self._hilos.get(hilo_id)
-        return "ok" if row is not None and row["club_id"] == club_id else "sin_hilo"
+        visible = (
+            row is not None and row["club_id"] == club_id
+            and self.es_postulante_activo(club_id, row["deportista_id"])
+        )
+        return "ok" if visible else "sin_hilo"
 
     def _sorted_hilos(self, rows: Iterable[dict[str, Any]]) -> list[StoredHilo]:
         hilos = [self._stored_hilo(row) for row in rows]
@@ -432,6 +499,353 @@ class MockClubRepository:
             no_leidos_club=sum(
                 1 for m in mensajes if m.de == "deportista" and m.id > row["leido_club_id"]
             ),
+        )
+
+    # -- canales del club (G4) ----------------------------------------------------------
+
+    def list_canales_club(self, club_id: UUID) -> list[StoredCanal]:
+        return self._sorted_canales(
+            self._canal_club(row) for row in self._canales.values() if row["club_id"] == club_id
+        )
+
+    def get_canal_club(self, club_id: UUID, canal_id: UUID) -> StoredCanal | None:
+        row = self._canal_row(club_id, canal_id)
+        return self._canal_club(row) if row is not None else None
+
+    def create_canal(
+        self,
+        club_id: UUID,
+        nombre: str,
+        miembros_escriben: bool,
+        *,
+        max_canales: int,
+        max_miembros: int,
+    ) -> tuple[CrearCanalResult, StoredCanal | None]:
+        if sum(1 for row in self._canales.values() if row["club_id"] == club_id) >= max_canales:
+            return "sin_cupo", None
+        now = self._tick()
+        row = {
+            "id": uuid4(), "club_id": club_id, "nombre": nombre,
+            "miembros_escriben": miembros_escriben, "leido_club_id": 0, "fecha_creacion": now,
+            "ultima_actividad": now, "aviso_inactividad_en": None, "mantener_hasta": None,
+        }
+        self._canales[row["id"]] = row
+        aceptados = sorted(
+            {
+                p["usuario_id"] for p in self._postulaciones.values()
+                if p["estado"] == "ACEPTADO"
+                and self._convocatorias[p["convocatoria_id"]]["club_id"] == club_id
+            },
+            key=str,
+        )[:max_miembros]
+        for usuario_id in aceptados:
+            self._add_miembro(row["id"], usuario_id, self.nombre_postulante(club_id, usuario_id))
+        return "creado", self._canal_club(row)
+
+    def update_canal(
+        self, club_id: UUID, canal_id: UUID, changes: dict[str, Any]
+    ) -> StoredCanal | None:
+        row = self._canal_row(club_id, canal_id)
+        if row is None:
+            return None
+        row.update({k: v for k, v in changes.items() if k in ("nombre", "miembros_escriben")})
+        return self._canal_club(row)
+
+    def delete_canal(self, club_id: UUID, canal_id: UUID) -> bool:
+        if self._canal_row(club_id, canal_id) is None:
+            return False
+        self._borrar_canal(canal_id)
+        return True
+
+    def list_miembros_canal(
+        self, club_id: UUID, canal_id: UUID
+    ) -> list[StoredMiembroCanal] | None:
+        if self._canal_row(club_id, canal_id) is None:
+            return None
+        return sorted(
+            (
+                StoredMiembroCanal(usuario_id=u, nombre=m["nombre"], agregado_en=m["agregado_en"])
+                for (c, u), m in self._miembros.items() if c == canal_id
+            ),
+            key=lambda m: (m.nombre.lower(), str(m.usuario_id)),
+        )
+
+    def list_candidatos_canal(
+        self, club_id: UUID, canal_id: UUID
+    ) -> list[StoredMiembroCanal] | None:
+        if self._canal_row(club_id, canal_id) is None:
+            return None
+        return sorted(
+            (
+                StoredMiembroCanal(usuario_id=u, nombre=nombre)
+                for u, nombre in self._postulantes_activos(club_id).items()
+                if (canal_id, u) not in self._miembros
+            ),
+            key=lambda m: (m.nombre.lower(), str(m.usuario_id)),
+        )
+
+    def add_miembro_canal(
+        self, club_id: UUID, canal_id: UUID, usuario_id: UUID, *, max_miembros: int
+    ) -> AgregarMiembroResult:
+        if self._canal_row(club_id, canal_id) is None:
+            return "sin_canal"
+        nombre = self.nombre_postulante(club_id, usuario_id)
+        if nombre is None:
+            return "no_postulante"
+        if (canal_id, usuario_id) in self._miembros:
+            return "ya_estaba"
+        if sum(1 for c, _ in self._miembros if c == canal_id) >= max_miembros:
+            return "sin_cupo"
+        self._add_miembro(canal_id, usuario_id, nombre)
+        return "agregado"
+
+    def remove_miembro_canal(self, club_id: UUID, canal_id: UUID, usuario_id: UUID) -> bool:
+        if self._canal_row(club_id, canal_id) is None:
+            return False
+        self._miembros.pop((canal_id, usuario_id), None)
+        return True
+
+    def add_mensaje_canal(
+        self,
+        canal_id: UUID,
+        autor_id: UUID,
+        de: str,
+        autor_nombre: str | None,
+        texto: str,
+        client_message_id: UUID,
+        aviso: OutboxMessage,
+    ) -> tuple[StoredMensajeCanal, bool]:
+        row = self._canales.get(canal_id)
+        if row is None:
+            raise CanalEliminado(canal_id)
+        clave = (canal_id, autor_id, client_message_id)
+        for mensaje in self._mensajes_canal:
+            if (mensaje.canal_id, mensaje.autor_id, mensaje.client_message_id) == clave:
+                return self._con_autor(mensaje), False
+        self._ultimo_mensaje_canal_id += 1
+        mensaje = StoredMensajeCanal(
+            id=self._ultimo_mensaje_canal_id, canal_id=canal_id, autor_id=autor_id, de=de,
+            autor_nombre=autor_nombre or "", texto=texto, client_message_id=client_message_id,
+            enviado_en=self._tick(),
+        )
+        self._mensajes_canal.append(mensaje)
+        row.update(ultima_actividad=mensaje.enviado_en, aviso_inactividad_en=None, mantener_hasta=None)
+        for (c, usuario_id), miembro in sorted(self._miembros.items(), key=lambda i: str(i[0][1])):
+            if c == canal_id and usuario_id != autor_id and not miembro["silenciado"]:
+                self.outbox.append(
+                    OutboxEvent(
+                        user_id=usuario_id, kind=aviso.kind, title=aviso.title, body=aviso.body,
+                        data=dict(aviso.data),
+                    )
+                )
+        return self._con_autor(mensaje), True
+
+    def decidir_inactividad(
+        self, club_id: UUID, canal_id: UUID, decision: str, mantener_hasta: datetime
+    ) -> DecisionInactividadResult:
+        row = self._canal_row(club_id, canal_id)
+        if row is None:
+            return "sin_canal"
+        if row["aviso_inactividad_en"] is None:
+            return "sin_aviso"
+        if decision == "eliminar":
+            self._borrar_canal(canal_id)
+            return "eliminado"
+        row.update(aviso_inactividad_en=None, mantener_hasta=mantener_hasta)
+        return "mantenido"
+
+    def mensajes_canal_club(
+        self,
+        club_id: UUID,
+        usuario_id: UUID,
+        canal_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[StoredCanal | None, list[StoredMensajeCanal]]:
+        row = self._canal_row(club_id, canal_id)
+        if row is None or self.get_admin(club_id, usuario_id) is None:
+            return None, []
+        return self._canal_club(row), self._pagina_canal(canal_id, after_id, before_id, limit)
+
+    def mark_read_canal_club(
+        self, club_id: UUID, usuario_id: UUID, canal_id: UUID, hasta_id: int
+    ) -> bool:
+        row = self._canal_row(club_id, canal_id)
+        if row is None or self.get_admin(club_id, usuario_id) is None:
+            return False
+        row["leido_club_id"] = max(row["leido_club_id"], min(hasta_id, self._ultimo_canal(canal_id)))
+        return True
+
+    def list_canales_deportista(self, usuario_id: UUID) -> list[StoredCanal]:
+        return self._sorted_canales(
+            self._canal_miembro(row, usuario_id)
+            for row in self._canales.values()
+            if (row["id"], usuario_id) in self._miembros and self._clubs[row["club_id"]].is_active
+        )
+
+    def get_canal_deportista(self, canal_id: UUID, usuario_id: UUID) -> StoredCanal | None:
+        row = self._canal_de_miembro(canal_id, usuario_id)
+        return self._canal_miembro(row, usuario_id) if row is not None else None
+
+    def mensajes_canal_deportista(
+        self,
+        canal_id: UUID,
+        usuario_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[StoredCanal | None, list[StoredMensajeCanal]]:
+        row = self._canal_de_miembro(canal_id, usuario_id)
+        if row is None:
+            return None, []
+        return (
+            self._canal_miembro(row, usuario_id),
+            self._pagina_canal(canal_id, after_id, before_id, limit),
+        )
+
+    def mark_read_canal_deportista(self, canal_id: UUID, usuario_id: UUID, hasta_id: int) -> bool:
+        if self._canal_de_miembro(canal_id, usuario_id) is None:
+            return False
+        miembro = self._miembros[(canal_id, usuario_id)]
+        miembro["leido_id"] = max(miembro["leido_id"], min(hasta_id, self._ultimo_canal(canal_id)))
+        return True
+
+    def set_silencio_canal(self, canal_id: UUID, usuario_id: UUID, silenciado: bool) -> bool:
+        if self._canal_de_miembro(canal_id, usuario_id) is None:
+            return False
+        self._miembros[(canal_id, usuario_id)]["silenciado"] = silenciado
+        return True
+
+    @contextmanager
+    def inactividad_lock(self) -> Iterator[bool]:
+        # One process: the lock is always free (tests take it like a real run).
+        yield True
+
+    def canales_por_revisar(self, inactivo_desde: datetime) -> list[CanalInactividad]:
+        return [
+            self._canal_inactividad(row) for row in self._canales.values()
+            if row["aviso_inactividad_en"] is not None or row["ultima_actividad"] <= inactivo_desde
+        ]
+
+    def avisar_inactividad(
+        self, canal: CanalInactividad, ahora: datetime, aviso: OutboxMessage
+    ) -> bool:
+        row = self._canales.get(canal.id)
+        if (
+            row is None or row["aviso_inactividad_en"] is not None
+            or row["ultima_actividad"] != canal.ultima_actividad
+            or row["mantener_hasta"] != canal.mantener_hasta
+        ):
+            return False
+        row["aviso_inactividad_en"] = ahora
+        for admin in self.list_admins(row["club_id"]):
+            self.outbox.append(
+                OutboxEvent(
+                    user_id=admin.usuario_id, kind=aviso.kind, title=aviso.title, body=aviso.body,
+                    data=dict(aviso.data),
+                )
+            )
+        return True
+
+    def eliminar_canal_inactivo(self, canal: CanalInactividad) -> bool:
+        row = self._canales.get(canal.id)
+        if (
+            row is None or row["aviso_inactividad_en"] is None
+            or row["aviso_inactividad_en"] != canal.aviso_inactividad_en
+        ):
+            return False
+        self._borrar_canal(canal.id)
+        return True
+
+    def set_canal_fechas(self, canal_id: UUID, **fechas: datetime | None) -> None:
+        """Test helper: move ultima_actividad, aviso_inactividad_en or mantener_hasta."""
+        self._canales[canal_id].update(fechas)
+
+    def _canal_row(self, club_id: UUID, canal_id: UUID) -> dict[str, Any] | None:
+        row = self._canales.get(canal_id)
+        return row if row is not None and row["club_id"] == club_id else None
+
+    def _canal_de_miembro(self, canal_id: UUID, usuario_id: UUID) -> dict[str, Any] | None:
+        row = self._canales.get(canal_id)
+        if (
+            row is None or (canal_id, usuario_id) not in self._miembros
+            or not self._clubs[row["club_id"]].is_active
+        ):
+            return None
+        return row
+
+    def _add_miembro(self, canal_id: UUID, usuario_id: UUID, nombre: str | None) -> None:
+        self._miembros[(canal_id, usuario_id)] = {
+            "nombre": nombre or "Deportista", "agregado_en": self._tick(),
+            "silenciado": False, "leido_id": 0,
+        }
+
+    def _borrar_canal(self, canal_id: UUID) -> None:
+        del self._canales[canal_id]
+        self._miembros = {k: v for k, v in self._miembros.items() if k[0] != canal_id}
+        self._mensajes_canal = [m for m in self._mensajes_canal if m.canal_id != canal_id]
+
+    def _ultimo_canal(self, canal_id: UUID) -> int:
+        return max((m.id for m in self._mensajes_canal if m.canal_id == canal_id), default=0)
+
+    def _con_autor(self, mensaje: StoredMensajeCanal) -> StoredMensajeCanal:
+        """The club's messages carry the club's current name."""
+        if mensaje.de != "club":
+            return mensaje
+        club_id = self._canales[mensaje.canal_id]["club_id"]
+        return replace(mensaje, autor_nombre=self._clubs[club_id].nombre)
+
+    def _pagina_canal(
+        self, canal_id: UUID, after_id: int | None, before_id: int | None, limit: int
+    ) -> list[StoredMensajeCanal]:
+        mensajes = [
+            self._con_autor(m) for m in self._mensajes_canal
+            if m.canal_id == canal_id
+            and (after_id is None or m.id > after_id)
+            and (before_id is None or m.id < before_id)
+        ]
+        return mensajes[:limit] if after_id is not None else mensajes[-limit:]
+
+    def _canal_base(self, row: dict[str, Any]) -> dict[str, Any]:
+        club = self._clubs[row["club_id"]]
+        mensajes = [m for m in self._mensajes_canal if m.canal_id == row["id"]]
+        return {
+            **{k: v for k, v in row.items() if k != "leido_club_id"},
+            "club_nombre": club.nombre, "club_logo": club.logo,
+            "miembros": sum(1 for c, _ in self._miembros if c == row["id"]),
+            "ultimo": self._con_autor(mensajes[-1]) if mensajes else None,
+        }
+
+    def _canal_club(self, row: dict[str, Any]) -> StoredCanal:
+        no_leidos = sum(
+            1 for m in self._mensajes_canal
+            if m.canal_id == row["id"] and m.de == "deportista" and m.id > row["leido_club_id"]
+        )
+        return StoredCanal(**self._canal_base(row), no_leidos=no_leidos)
+
+    def _canal_miembro(self, row: dict[str, Any], usuario_id: UUID) -> StoredCanal:
+        miembro = self._miembros[(row["id"], usuario_id)]
+        no_leidos = sum(
+            1 for m in self._mensajes_canal
+            if m.canal_id == row["id"] and m.autor_id != usuario_id and m.id > miembro["leido_id"]
+        )
+        return StoredCanal(
+            **self._canal_base(row), no_leidos=no_leidos, silenciado=miembro["silenciado"]
+        )
+
+    @staticmethod
+    def _sorted_canales(canales: Iterable[StoredCanal]) -> list[StoredCanal]:
+        return sorted(canales, key=lambda c: (c.ultima_actividad, str(c.id)), reverse=True)
+
+    @staticmethod
+    def _canal_inactividad(row: dict[str, Any]) -> CanalInactividad:
+        return CanalInactividad(
+            id=row["id"], club_id=row["club_id"], nombre=row["nombre"],
+            ultima_actividad=row["ultima_actividad"],
+            aviso_inactividad_en=row["aviso_inactividad_en"], mantener_hasta=row["mantener_hasta"],
         )
 
     # -- convocatorias (HU-32) --------------------------------------------------
@@ -585,10 +999,27 @@ class MockClubRepository:
         if set_comentario:
             row["comentario_club"] = comentario
         row["fecha_actualizacion"] = self._tick()
+        if estado == "RECHAZADO":
+            self._sin_postulacion_activa(
+                self._convocatorias[row["convocatoria_id"]]["club_id"], row["usuario_id"]
+            )
         if estado == anterior:
             return "sin_cambios", self._stored_postulacion(row)
         self.outbox.append(evento)
         return "actualizada", self._stored_postulacion(row)
+
+    def _sin_postulacion_activa(self, club_id: UUID, usuario_id: UUID) -> None:
+        """G3: without another active postulación in the club, the consulta
+        thread (with its messages) and the channel memberships go away."""
+        if self.es_postulante_activo(club_id, usuario_id):
+            return
+        hilo_id = self._hilo_id(club_id, usuario_id)
+        if hilo_id is not None:
+            del self._hilos[hilo_id]
+            self._mensajes = [m for m in self._mensajes if m.hilo_id != hilo_id]
+        for canal_id, canal in self._canales.items():
+            if canal["club_id"] == club_id:
+                self._miembros.pop((canal_id, usuario_id), None)
 
     # -- comunicados de clubes (HU-38) ------------------------------------------------
 
@@ -769,6 +1200,14 @@ class MockClubRepository:
         assert convocatoria is not None
         values = {key: value for key, value in row.items() if key != "convocatoria_id"}
         return StoredPostulacion(**values, convocatoria=convocatoria)
+
+
+def _nombre_perfil(perfil: dict[str, Any]) -> str:
+    """"Nombre A." from a postulación's perfil_deportivo, as the club sees it
+    (same expression as the PostgreSQL repository)."""
+    partes = [perfil.get("nombre"), perfil.get("apellido_inicial")]
+    nombre = " ".join(" ".join(p for p in partes if isinstance(p, str)).split())[:100].strip()
+    return nombre or "Deportista"
 
 
 def _pendiente(asignacion: StoredAsignacion) -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Protocol
@@ -244,6 +245,72 @@ class StoredHilo:
     no_leidos_club: int = 0
 
 
+@dataclass(frozen=True)
+class StoredMensajeCanal:
+    """A row of club_canal_mensaje (010). autor_nombre is the club's name when
+    de = club (read from club), the member's name snapshot otherwise."""
+
+    id: int
+    canal_id: UUID
+    autor_id: UUID
+    de: str
+    autor_nombre: str
+    texto: str
+    client_message_id: UUID
+    enviado_en: datetime
+
+
+@dataclass
+class StoredCanal:
+    """A row of club_canal (010) as one reader sees it: the club (no_leidos =
+    athletes' messages after the club's read mark) or a member (no_leidos =
+    others' messages after their mark, silenciado = their own setting)."""
+
+    id: UUID
+    club_id: UUID
+    club_nombre: str
+    club_logo: str | None
+    nombre: str
+    miembros_escriben: bool
+    fecha_creacion: datetime
+    ultima_actividad: datetime
+    aviso_inactividad_en: datetime | None = None
+    mantener_hasta: datetime | None = None
+    miembros: int = 0
+    ultimo: StoredMensajeCanal | None = None
+    no_leidos: int = 0
+    silenciado: bool = False
+
+
+@dataclass(frozen=True)
+class StoredMiembroCanal:
+    """A member of a channel, or a candidate (agregado_en None)."""
+
+    usuario_id: UUID
+    nombre: str
+    agregado_en: datetime | None = None
+
+
+@dataclass(frozen=True)
+class CanalInactividad:
+    """What the hourly inactivity check needs of a channel."""
+
+    id: UUID
+    club_id: UUID
+    nombre: str
+    ultima_actividad: datetime
+    aviso_inactividad_en: datetime | None
+    mantener_hasta: datetime | None
+
+
+class HiloEliminado(Exception):
+    """The thread was deleted (a rejected postulación) while writing to it."""
+
+
+class CanalEliminado(Exception):
+    """The channel was deleted while writing to it."""
+
+
 # Outcome of creating a club; the checks run atomically with the inserts.
 CreateClubResult = Literal["creado", "ya_administra", "rut_duplicado"]
 # Outcome of assigning an email. duplicada: already pending in that club;
@@ -254,6 +321,15 @@ ClaimResult = Literal["aceptada", "sin_asignacion", "ya_administra"]
 # Who may read a club's thread: sin_club (no such club), no_admin (the account
 # does not administer it), sin_hilo (not a thread of that club) or ok.
 AccesoHilo = Literal["ok", "sin_club", "no_admin", "sin_hilo"]
+# Who may read the athlete's side of a consulta (G3): sin_club (no such active
+# club), no_postulante (no postulación other than RECHAZADO in the club) or ok.
+AccesoDeportista = Literal["ok", "sin_club", "no_postulante"]
+# Outcome of creating a channel; sin_cupo when the club already has the maximum.
+CrearCanalResult = Literal["creado", "sin_cupo"]
+# Outcome of adding a member to a channel.
+AgregarMiembroResult = Literal["agregado", "ya_estaba", "sin_canal", "no_postulante", "sin_cupo"]
+# Outcome of the club's answer to an inactivity notice.
+DecisionInactividadResult = Literal["eliminado", "mantenido", "sin_aviso", "sin_canal"]
 # Outcome of an application; every check runs atomically with the insert.
 ApplyResult = Literal["creada", "no_encontrada", "no_abierta", "duplicada", "sin_cupos"]
 # Outcome of a review. sin_cambios: same estado (the comment may still change).
@@ -342,17 +418,33 @@ class ClubRepository(Protocol):
 
     def get_hilo_deportista(self, club_id: UUID, deportista_id: UUID) -> StoredHilo | None: ...
 
-    def ensure_hilo(self, club_id: UUID, deportista_id: UUID, deportista_nombre: str) -> StoredHilo:
+    def ensure_hilo(
+        self, club_id: UUID, deportista_id: UUID, deportista_nombre: str
+    ) -> StoredHilo | None:
         """The athlete's thread with the club, created if missing (a concurrent
-        creation returns the same thread)."""
+        creation returns the same thread). None, and nothing created, when the
+        athlete is not an active postulante of the club (checked atomically
+        with a rejection, G3)."""
+        ...
+
+    def es_postulante_activo(self, club_id: UUID, usuario_id: UUID) -> bool:
+        """Whether the account has a postulación other than RECHAZADO to a
+        convocatoria of the club (G3)."""
+        ...
+
+    def nombre_postulante(self, club_id: UUID, usuario_id: UUID) -> str | None:
+        """The name the club sees in the athlete's latest active postulación
+        (perfil_deportivo: nombre and apellido_inicial); None when the account
+        is not an active postulante of the club."""
         ...
 
     def list_hilos_deportista(self, deportista_id: UUID) -> list[StoredHilo]:
-        """The athlete's threads with active clubs, latest message first."""
+        """The athlete's threads with active clubs where they are an active
+        postulante, latest message first."""
         ...
 
     def list_hilos_club(self, club_id: UUID) -> list[StoredHilo]:
-        """The club's threads, latest message first."""
+        """The club's threads with active postulantes, latest message first."""
         ...
 
     def list_mensajes(
@@ -374,7 +466,8 @@ class ClubRepository(Protocol):
         """Insert the message, or return the one already sent with that
         client_message_id by that author (False). Only a new message writes
         aviso to the outbox, in the same transaction: to the athlete when the
-        club writes, to every administrator of the club when the athlete does."""
+        club writes, to every administrator of the club when the athlete does.
+        Raises HiloEliminado when the thread no longer exists."""
         ...
 
     def mark_read(self, hilo_id: UUID, de: str, hasta_id: int) -> None:
@@ -392,9 +485,10 @@ class ClubRepository(Protocol):
         after_id: int | None,
         before_id: int | None,
         limit: int,
-    ) -> tuple[bool, UUID | None, list[StoredMensaje]]:
-        """The athlete's page of messages with an active club: (club found,
-        thread id or None, messages as list_mensajes returns them)."""
+    ) -> tuple[AccesoDeportista, UUID | None, list[StoredMensaje]]:
+        """The athlete's page of messages with an active club where they are an
+        active postulante: (acceso, thread id or None, messages as
+        list_mensajes returns them; only when ok)."""
         ...
 
     def mensajes_club(
@@ -408,12 +502,15 @@ class ClubRepository(Protocol):
         limit: int,
     ) -> tuple[AccesoHilo, list[StoredMensaje]]:
         """A page of a club's thread read by usuario_id; messages only when ok.
-        The club may be inactive (its administrators still read)."""
+        The club may be inactive (its administrators still read). A thread
+        whose athlete is no longer an active postulante is sin_hilo."""
         ...
 
-    def mark_read_deportista(self, club_id: UUID, deportista_id: UUID, hasta_id: int) -> bool:
+    def mark_read_deportista(
+        self, club_id: UUID, deportista_id: UUID, hasta_id: int
+    ) -> AccesoDeportista:
         """mark_read of the athlete's thread with an active club, if there is
-        one. False when the club does not exist or is inactive."""
+        one; only applied when ok."""
         ...
 
     def mark_read_club(
@@ -506,7 +603,166 @@ class ClubRepository(Protocol):
     ) -> tuple[ReviewResult, StoredPostulacion]:
         """Set the estado (and the comment when set_comentario) and, only if the
         estado changed, write evento to the outbox in the same transaction.
-        Leaving RECHAZADO takes a cupo again: sin_cupos when none is free."""
+        Leaving RECHAZADO takes a cupo again: sin_cupos when none is free.
+        When it becomes RECHAZADO and the athlete has no other active
+        postulación in the club, their consulta thread (with its messages) and
+        their channel memberships in the club are deleted in the same
+        transaction (G3)."""
+        ...
+
+    # -- canales del club (G4) ----------------------------------------------------------
+    # Channels of a club seen by its administrators; a channel of another club
+    # is the same as a missing one (None / sin_canal).
+
+    def list_canales_club(self, club_id: UUID) -> list[StoredCanal]:
+        """The club's channels, latest activity first."""
+        ...
+
+    def get_canal_club(self, club_id: UUID, canal_id: UUID) -> StoredCanal | None: ...
+
+    def create_canal(
+        self,
+        club_id: UUID,
+        nombre: str,
+        miembros_escriben: bool,
+        *,
+        max_canales: int,
+        max_miembros: int,
+    ) -> tuple[CrearCanalResult, StoredCanal | None]:
+        """Create the channel with the club's athletes that have an ACEPTADO
+        postulación as members (up to max_miembros). sin_cupo when the club
+        already has max_canales; the count and the insert are atomic."""
+        ...
+
+    def update_canal(
+        self, club_id: UUID, canal_id: UUID, changes: dict[str, Any]
+    ) -> StoredCanal | None:
+        """Apply nombre and/or miembros_escriben."""
+        ...
+
+    def delete_canal(self, club_id: UUID, canal_id: UUID) -> bool:
+        """Delete the channel with its members and messages."""
+        ...
+
+    def list_miembros_canal(
+        self, club_id: UUID, canal_id: UUID
+    ) -> list[StoredMiembroCanal] | None:
+        """The members by name; None when there is no such channel."""
+        ...
+
+    def list_candidatos_canal(
+        self, club_id: UUID, canal_id: UUID
+    ) -> list[StoredMiembroCanal] | None:
+        """Active postulantes of the club not in the channel, by name."""
+        ...
+
+    def add_miembro_canal(
+        self, club_id: UUID, canal_id: UUID, usuario_id: UUID, *, max_miembros: int
+    ) -> AgregarMiembroResult:
+        """Add an active postulante of the club (name from their postulación);
+        idempotent. The checks and the insert are atomic."""
+        ...
+
+    def remove_miembro_canal(self, club_id: UUID, canal_id: UUID, usuario_id: UUID) -> bool:
+        """Idempotent; False only when there is no such channel."""
+        ...
+
+    def add_mensaje_canal(
+        self,
+        canal_id: UUID,
+        autor_id: UUID,
+        de: str,
+        autor_nombre: str | None,
+        texto: str,
+        client_message_id: UUID,
+        aviso: OutboxMessage,
+    ) -> tuple[StoredMensajeCanal, bool]:
+        """Insert the message, or return the one already sent with that
+        client_message_id by that author (False). A new message moves
+        ultima_actividad, cancels a pending inactivity notice (and
+        mantener_hasta) and writes aviso to the outbox for every member that
+        did not mute the channel (except the author), in the same transaction.
+        Raises CanalEliminado when the channel no longer exists."""
+        ...
+
+    def decidir_inactividad(
+        self, club_id: UUID, canal_id: UUID, decision: str, mantener_hasta: datetime
+    ) -> DecisionInactividadResult:
+        """The club's answer to a pending notice: eliminar deletes the channel;
+        mantener clears the notice and sets mantener_hasta. sin_aviso when no
+        notice is pending."""
+        ...
+
+    # Polling paths of channels (sección F): one connection, one statement each.
+
+    def mensajes_canal_club(
+        self,
+        club_id: UUID,
+        usuario_id: UUID,
+        canal_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[StoredCanal | None, list[StoredMensajeCanal]]:
+        """The channel (club view) and a page of its messages, when usuario_id
+        administers the club and the channel is the club's; (None, []) otherwise."""
+        ...
+
+    def mark_read_canal_club(
+        self, club_id: UUID, usuario_id: UUID, canal_id: UUID, hasta_id: int
+    ) -> bool:
+        """Move the club's read mark forward; False when no access."""
+        ...
+
+    def list_canales_deportista(self, usuario_id: UUID) -> list[StoredCanal]:
+        """The member's channels of active clubs, latest activity first."""
+        ...
+
+    def get_canal_deportista(self, canal_id: UUID, usuario_id: UUID) -> StoredCanal | None:
+        """The channel (member view) when usuario_id is a member and the club is active."""
+        ...
+
+    def mensajes_canal_deportista(
+        self,
+        canal_id: UUID,
+        usuario_id: UUID,
+        *,
+        after_id: int | None,
+        before_id: int | None,
+        limit: int,
+    ) -> tuple[StoredCanal | None, list[StoredMensajeCanal]]:
+        """Like mensajes_canal_club for a member of a channel of an active club."""
+        ...
+
+    def mark_read_canal_deportista(self, canal_id: UUID, usuario_id: UUID, hasta_id: int) -> bool:
+        """False when the account is not a member (or the club is inactive)."""
+        ...
+
+    def set_silencio_canal(self, canal_id: UUID, usuario_id: UUID, silenciado: bool) -> bool:
+        """False when the account is not a member (or the club is inactive)."""
+        ...
+
+    # Hourly inactivity check (G4).
+
+    def inactividad_lock(self) -> AbstractContextManager[bool]:
+        """Context holding pg_try_advisory_lock: True only for the one
+        instance that got it."""
+        ...
+
+    def canales_por_revisar(self, inactivo_desde: datetime) -> list[CanalInactividad]:
+        """Channels with a pending notice or no activity since inactivo_desde."""
+        ...
+
+    def avisar_inactividad(
+        self, canal: CanalInactividad, ahora: datetime, aviso: OutboxMessage
+    ) -> bool:
+        """Stamp aviso_inactividad_en = ahora and notify every administrator of
+        the club, only if the channel is still as read (no message since)."""
+        ...
+
+    def eliminar_canal_inactivo(self, canal: CanalInactividad) -> bool:
+        """Delete the channel only if its pending notice is still the one read."""
         ...
 
     # -- comunicados de clubes (HU-38) ------------------------------------------------
