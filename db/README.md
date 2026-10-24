@@ -32,7 +32,16 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 - `consulta_mensaje` (008): `id` bigint identity (sirve para paginar), `hilo_id`,
   `autor_id`, `de` (`deportista` o `club`), `texto` (1–1000), `client_message_id`
   (UUID de la app; `UNIQUE (hilo_id, autor_id, client_message_id)` hace idempotente
-  el reintento) y `enviado_en`. No se editan ni se borran.
+  el reintento) y `enviado_en`. No se editan. Desde la 010, si una postulación pasa a
+  `RECHAZADO` y la persona no tiene otra activa en el club, su hilo se borra y sus
+  mensajes caen con él (`ON DELETE CASCADE`).
+- `club_canal` (migración 010): canales de anuncios del club (`nombre` 1–60,
+  `miembros_escriben`, `leido_club_id`, `ultima_actividad`, `aviso_inactividad_en`,
+  `mantener_hasta`); se borran con su club. Máximo 20 por club (lo controla el servicio).
+- `club_canal_miembro` (010): `(canal_id, usuario_id)`, `nombre` (copia del perfil de su
+  postulación), `agregado_en`, `silenciado`, `leido_id`. Máximo 500 por canal.
+- `club_canal_mensaje` (010): como `consulta_mensaje`, con `canal_id` y `autor_nombre`
+  (solo de los miembros; el del club se lee de `club`).
 - `deporte`: catálogo (`id`, `nombre`, `descripcion`, `is_active`). El servicio solo lo lee.
 - `club_deporte`: deportes de cada club; el representante los agrega y quita.
 - `convocatoria` (migración 002): pruebas que publica un club (`club_id` → `club`,
@@ -85,8 +94,9 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 | `clubs_api.notification_outbox` | USAGE del esquema; SELECT, INSERT, UPDATE, DELETE | 004 (el servicio inserta; el worker del gateway, con este mismo rol, lee, marca y purga) |
 | `club_administrador` | SELECT, INSERT, DELETE (quitar o salir) | 007 |
 | `club_admin_asignacion` | SELECT, INSERT, UPDATE (marcar aceptada o revocada; nunca se borra) | 009 |
-| `consulta_hilo` | SELECT, INSERT, UPDATE (marcas de leído) | 008 |
-| `consulta_mensaje` | SELECT, INSERT (la columna identity no requiere permisos sobre secuencias) | 008 |
+| `consulta_hilo` | SELECT, INSERT, UPDATE (marcas de leído), DELETE (rechazo) | 008, 010 |
+| `consulta_mensaje` | SELECT, INSERT, DELETE (en cascada con su hilo; la columna identity no requiere permisos sobre secuencias) | 008, 010 |
+| `club_canal`, `club_canal_miembro`, `club_canal_mensaje` | SELECT, INSERT, UPDATE, DELETE | 010 |
 
 No tiene DELETE sobre `club` ni acceso a `interesado_club`.
 
@@ -123,6 +133,10 @@ En pgAdmin, conectado a `sportmatch_clubs` como `postgres`, una vez y en orden:
 10. `db/migrations/009_admin_por_correo.sql`: crea `club_admin_asignacion` y elimina
    `club_invitacion_admin` (las invitaciones pendientes se pierden: hay que asignar los
    correos). Mismas garantías; requiere la 007.
+11. `db/migrations/010_consultas_postulantes_canales.sql`: `ON DELETE CASCADE` de
+   `consulta_mensaje` a su hilo, DELETE sobre las consultas y las tablas de canales
+   (`club_canal`, `club_canal_miembro`, `club_canal_mensaje`). Mismas garantías;
+   requiere la 008.
 
 `python -m app.database.migrate` aplica las migraciones con el usuario de `DB_*`;
 con el rol del servicio solo sirve para comprobar que ya están aplicadas.
