@@ -82,3 +82,10 @@ class HiloClub(APIModel):
     deportista_nombre: str
     ultimo: Mensaje | None
     no_leidos: int
+
+
+class ConsultaIniciada(APIModel):
+    """Answer of the club writing first to a postulante (G3)."""
+
+    hilo_id: UUID
+    mensaje: Mensaje
