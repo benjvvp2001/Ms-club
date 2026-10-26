@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import math
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 
 from psycopg.conninfo import make_conninfo
@@ -122,6 +124,16 @@ _INTEGRATION_API_KEY = "579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://\S+$", re.IGNORECASE)
 
 
+def _http_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+        return (parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+                and not parsed.username and not parsed.password and not parsed.fragment
+                and not any(char.isspace() for char in value))
+    except ValueError:
+        return False
+
+
 @dataclass(frozen=True)
 class WebpaySettings:
     # True: no call to Transbank; payments are simulated with a page served by
@@ -137,6 +149,7 @@ class WebpaySettings:
     # or a deep link of the mobile app. It receives the token as query params.
     frontend_return_url: str = ""
     timeout_seconds: float = 15.0
+    web_return_url: str = ""
 
     @property
     def return_url(self) -> str:
@@ -171,7 +184,7 @@ def get_webpay_settings() -> WebpaySettings:
             api_key = api_key or _INTEGRATION_API_KEY
 
     public_url = os.getenv("WEBPAY_PUBLIC_URL", "").strip().rstrip("/")
-    if not public_url.startswith(("http://", "https://")):
+    if not _http_url(public_url) or urlsplit(public_url).query:
         raise RuntimeError("WEBPAY_PUBLIC_URL must be the http(s) URL of this service")
     if environment == "PRODUCTION" and not public_url.startswith("https://"):
         raise RuntimeError("WEBPAY_PUBLIC_URL must be https in PRODUCTION")
@@ -185,12 +198,19 @@ def get_webpay_settings() -> WebpaySettings:
             "https://app.example/pago/resultado or sportmatch://pago"
         )
 
+    web_return_url = os.getenv("WEBPAY_WEB_RETURN_URL", "").strip()
+    if web_return_url and (
+        not _http_url(web_return_url)
+        or (environment == "PRODUCTION" and not web_return_url.startswith("https://"))
+    ):
+        raise RuntimeError("WEBPAY_WEB_RETURN_URL must be an http(s) URL (https in PRODUCTION)")
+
     raw_timeout = os.getenv("WEBPAY_TIMEOUT_SECONDS", "15")
     try:
         timeout = float(raw_timeout)
     except ValueError as error:
         raise RuntimeError("WEBPAY_TIMEOUT_SECONDS must be a number") from error
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         raise RuntimeError("WEBPAY_TIMEOUT_SECONDS must be greater than zero")
 
     return WebpaySettings(
@@ -201,4 +221,5 @@ def get_webpay_settings() -> WebpaySettings:
         public_url=public_url,
         frontend_return_url=frontend_return_url,
         timeout_seconds=timeout,
+        web_return_url=web_return_url,
     )

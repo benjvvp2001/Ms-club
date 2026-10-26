@@ -21,7 +21,8 @@ suscripciones, `007_club_rut_administradores.sql` el RUT del club y sus administ
 `008_consultas_club.sql` las consultas deportista ↔ club, `009_admin_por_correo.sql`
 las asignaciones de administradores por correo (reemplazan a las invitaciones) y
 `010_consultas_postulantes_canales.sql` el borrado de consultas al rechazar y los canales
-del club.
+del club, y `011_chat_postulantes_convocatoria.sql` el interruptor del chat de cada
+convocatoria.
 
 ```
 app/
@@ -274,15 +275,16 @@ confirma después de la prueba.
   `estado`, `page`, `page_size`, y `conteo_por_estado` de toda la convocatoria.
 - `PATCH /api/v1/clubs/announcements/applications/{postulacion_id}` con
   `PostulacionEstadoUpdate` (el `UpdateApplicationStatusDto`):
-  `{"estado": "PRESELECCIONADO" | "ACEPTADO" | "RECHAZADO", "comentario": "..."}`.
-  `comentario` (hasta 1000) lo lee el deportista; si no se envía se mantiene, y
-  `null` lo borra. No se puede volver a `PENDIENTE`. Responde `200` con el candidato.
+  `{"estado": "PENDIENTE" | "PRESELECCIONADO" | "ACEPTADO" | "RECHAZADO", "comentario": "..."}`.
+  `PENDIENTE` es "en espera": el club deja la postulación sin decidir, sin aviso al
+  deportista. `comentario` (hasta 1000) lo lee el deportista; si no se envía se mantiene, y
+  `null` lo borra. Responde `200` con el candidato.
   Pasar desde `RECHAZADO` a otro estado vuelve a ocupar un cupo: `409` si no hay.
   `404` si la postulación no existe.
 
 ### Aviso al deportista
 
-Si el estado cambia, el mismo `UPDATE` escribe, en la misma transacción, un
+Si el estado cambia a `PRESELECCIONADO`, `ACEPTADO` o `RECHAZADO`, el mismo `UPDATE` escribe, en la misma transacción, un
 evento en `clubs_api.notification_outbox`: el patrón de Matching y Actividades
 (ver `Ms_gateway/docs/notificaciones.md`). El worker del gateway lo pasa a la
 bandeja del deportista y lo envía por push. Repetir el mismo estado no genera
@@ -385,6 +387,15 @@ respuestas firmadas por el club, nunca por la persona (no se expone `autor_id`).
   /{club_id}/consultas/me/messages` y `POST /{club_id}/consultas/me/read`. El primer
   mensaje crea la conversación y guarda el nombre del deportista (de Ms_Users con su
   token; `Deportista` si falla). Club inexistente o inactivo: `404`.
+- Chat por convocatoria (migración 011): cada convocatoria tiene `chat_postulantes_habilitado`
+  (booleano, `true` por defecto, lo que ya permitía el sistema). Con `false`, los postulantes
+  leen su consulta, pero `POST .../consultas/me/messages` responde `403` ("solo puedes leer");
+  el club siempre puede escribir. Un deportista con una postulación activa a una convocatoria
+  con el chat apagado en ese club no puede escribir al club. Se cambia con
+  `PATCH /api/v1/clubs/{club_id}/announcements/{convocatoria_id}/chat`, body
+  `{"chat_postulantes_habilitado": bool}`, solo para administradores del club dueño (`403` a
+  otros, `404` si la convocatoria no es del club). No avisa a nadie. Cada convocatoria lo
+  devuelve en `chat_postulantes_habilitado`.
 - Club (administradores): `GET /{club_id}/consultas`, `GET` y `POST
   /{club_id}/consultas/{hilo_id}/messages` y `POST /{club_id}/consultas/{hilo_id}/read`.
   Una conversación de otro club responde `404`. Un club inactivo lee pero no responde (`409`).
@@ -441,14 +452,18 @@ nuevas y propias de este servicio (`plan_suscripcion`, `transaccion_pago`,
    `session_id`, `amount` y `status: "PENDING"`, y registra la transacción.
    El comprador sale del token (un deportista paga por sí mismo; un `club_admin`,
    por su club) y el monto es el precio del plan: ninguno viaja en la petición.
-3. La app envía al navegador a `url` con un formulario **POST** de un solo campo,
-   `token_ws` (así lo exige Transbank), sin iframe.
-4. Webpay devuelve al usuario a `/api/v1/payments/webpay/return`, que lo reenvía
-   (303) a `WEBPAY_FRONTEND_RETURN_URL` con los parámetros como query:
+3. La app abre `checkout_url`, un enlace firmado que genera el formulario **POST**
+   con `token_ws`, sin iframe. La web inicia con `client: "web"` y usa el mismo puente.
+4. Webpay devuelve al usuario a `/api/v1/payments/webpay/return`, que confirma
+   con Transbank y lo reenvía (303) a `WEBPAY_FRONTEND_RETURN_URL` (app) o
+   `WEBPAY_WEB_RETURN_URL` (web), con los parámetros como query:
    `token_ws` si pasó por el formulario; `tbk_token`, `tbk_orden_compra` y
    `tbk_id_sesion` si canceló; solo los dos últimos si se agotó el tiempo.
 5. La app llama a `POST /api/v1/payments/webpay/commit` con esos parámetros
-   (`PagoConfirmar`, el `CommitPaymentDto`) y la sesión del usuario.
+   (`PagoConfirmar`, el `CommitPaymentDto`) y la sesión del usuario para recuperar
+   el comprobante o reintentar. Ante una respuesta perdida, el backend consulta el estado.
+
+Configuración, pruebas en Transbank y revisión de la web: [guía Webpay](docs/webpay/README.md).
 
 **Resultado de `commit`**
 
@@ -512,7 +527,8 @@ Una vez, en pgAdmin conectado a `sportmatch_clubs` como `postgres`, en este orde
 9. `db/migrations/008_consultas_club.sql`.
 10. `db/migrations/009_admin_por_correo.sql`.
 11. `db/migrations/010_consultas_postulantes_canales.sql`.
-12. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
+12. `db/migrations/011_chat_postulantes_convocatoria.sql`.
+13. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
 
 ```bash
 pip install -e ".[dev]"

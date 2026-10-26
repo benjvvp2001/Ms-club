@@ -12,8 +12,9 @@ from app.schemas.convocatoria import ConvocatoriaRead
 # Values without accents, like every other enum value of the API.
 # PRESELECCIONADO replaced HU-33's EN_REVISION (migration 004).
 EstadoPostulacion = Literal["PENDIENTE", "PRESELECCIONADO", "ACEPTADO", "RECHAZADO"]
-# States the club can set when reviewing; PENDIENTE is only the initial one.
-EstadoRevision = Literal["PRESELECCIONADO", "ACEPTADO", "RECHAZADO"]
+# States the club can set when reviewing. PENDIENTE is "en espera": the club puts
+# an application back on hold (no notice to the athlete).
+EstadoRevision = Literal["PENDIENTE", "PRESELECCIONADO", "ACEPTADO", "RECHAZADO"]
 ANTECEDENTES_MAX = 10
 ANIO_MINIMO = 1950
 

@@ -104,6 +104,8 @@ class StoredConvocatoria:
     fecha_creacion: datetime | None = None
     # Postulaciones that take a cupo (every estado except RECHAZADO).
     postulaciones_activas: int = 0
+    # Migration 011: false keeps the applicants from writing in their consulta.
+    chat_postulantes_habilitado: bool = True
 
 
 @dataclass
@@ -562,6 +564,20 @@ class ClubRepository(Protocol):
         """Mark it closed now; a convocatoria already closed keeps its date."""
         ...
 
+    def set_chat_postulantes(
+        self, club_id: UUID, convocatoria_id: UUID, habilitado: bool
+    ) -> StoredConvocatoria | None:
+        """Set chat_postulantes_habilitado of a convocatoria of club_id; None
+        when it is not one of that club (the same as a missing one)."""
+        ...
+
+    def chat_habilitado_para(self, club_id: UUID, usuario_id: UUID) -> bool:
+        """False when any postulación of usuario_id in club_id that is not
+        RECHAZADO belongs to a convocatoria with the chat turned off. The
+        consulta thread is one per club, so one closed convocatoria closes it
+        for the athlete while they keep an application there."""
+        ...
+
     # -- postulaciones (HU-33) ----------------------------------------------------
 
     def create_postulacion(
@@ -599,10 +615,11 @@ class ClubRepository(Protocol):
         *,
         comentario: str | None,
         set_comentario: bool,
-        evento: OutboxEvent,
+        evento: OutboxEvent | None,
     ) -> tuple[ReviewResult, StoredPostulacion]:
         """Set the estado (and the comment when set_comentario) and, only if the
-        estado changed, write evento to the outbox in the same transaction.
+        estado changed and evento is given, write it to the outbox in the same
+        transaction. Without evento (PENDIENTE: no notice) nothing is written.
         Leaving RECHAZADO takes a cupo again: sin_cupos when none is free.
         When it becomes RECHAZADO and the athlete has no other active
         postulación in the club, their consulta thread (with its messages) and

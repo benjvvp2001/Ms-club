@@ -36,6 +36,9 @@ class ConvocatoriaCreate(APIModel):
     comuna: str | None = Field(default=None, min_length=2, max_length=80, pattern=PLACE_PATTERN)
     titulo: str | None = Field(default=None, min_length=3, max_length=120)
     descripcion: str | None = Field(default=None, max_length=2000)
+    # Whether the athletes who applied may write in their consulta (migration 011).
+    # True by default: that is what the club's chat already allows today.
+    chat_postulantes_habilitado: bool = True
 
     @field_validator("comuna", "titulo", "descripcion", mode="before")
     @classmethod
@@ -67,6 +70,12 @@ class ConvocatoriaCreate(APIModel):
     def insert_values(self) -> dict[str, Any]:
         """Column values to insert; fields left out keep the table defaults."""
         return self.model_dump(exclude_none=True)
+
+
+class ConvocatoriaChatUpdate(APIModel):
+    """The club's switch for its applicants' chat (migration 011)."""
+
+    chat_postulantes_habilitado: bool
 
 
 class ConvocatoriaFilters(APIModel):
@@ -117,6 +126,8 @@ class ConvocatoriaRead(APIModel):
     comuna: str | None
     estado: EstadoConvocatoria
     fecha_creacion: datetime | None
+    # False: the athletes who applied can read the consulta but not write in it.
+    chat_postulantes_habilitado: bool
 
 
 class ConvocatoriaPage(APIModel):

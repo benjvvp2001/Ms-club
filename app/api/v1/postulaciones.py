@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, status
 
 from app.api.dependencies import get_athlete, get_club_admin, get_postulacion_service
 from app.core.security import Actor
+from app.schemas.convocatoria import ConvocatoriaChatUpdate, ConvocatoriaRead
 from app.schemas.postulacion import (
     CandidatoFilters,
     CandidatoPage,
@@ -78,9 +79,10 @@ def list_candidatos(
     "/announcements/applications/{postulacion_id}",
     response_model=CandidatoRead,
     summary="Cambiar el estado de un candidato",
-    description="Solo un administrador del club. Estados: PRESELECCIONADO, ACEPTADO, "
-    "RECHAZADO, con comentario opcional para el deportista. Si el estado cambia, se avisa al "
-    "deportista (bandeja y push vía Ms_gateway); repetir el mismo estado no genera aviso.",
+    description="Solo un administrador del club. Estados: PENDIENTE (en espera), "
+    "PRESELECCIONADO, ACEPTADO o RECHAZADO, con comentario opcional para el deportista. Si el "
+    "estado cambia a PRESELECCIONADO, ACEPTADO o RECHAZADO, se avisa al deportista (bandeja y "
+    "push vía Ms_gateway); PENDIENTE no avisa. Repetir el mismo estado no genera aviso.",
 )
 def review_candidato(
     postulacion_id: UUID,
@@ -89,3 +91,20 @@ def review_candidato(
     service: PostulacionService = Depends(get_postulacion_service),
 ) -> CandidatoRead:
     return service.review(actor, postulacion_id, payload)
+
+
+@router.patch(
+    "/{club_id}/announcements/{convocatoria_id}/chat",
+    response_model=ConvocatoriaRead,
+    summary="Permitir o no que los postulantes escriban en el chat de la convocatoria",
+    description="Solo un administrador del club dueño. Con false, los postulantes leen su "
+    "consulta pero no pueden escribir; el club siempre puede escribir. No avisa a nadie.",
+)
+def set_chat_postulantes(
+    club_id: UUID,
+    convocatoria_id: UUID,
+    payload: ConvocatoriaChatUpdate,
+    actor: Actor = Depends(get_club_admin),
+    service: PostulacionService = Depends(get_postulacion_service),
+) -> ConvocatoriaRead:
+    return service.set_chat_postulantes(actor, club_id, convocatoria_id, payload.chat_postulantes_habilitado)

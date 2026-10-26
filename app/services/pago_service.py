@@ -24,6 +24,7 @@ from app.schemas.pago import (
     SuscripcionRead,
 )
 from app.services.webpay import WebpayCommit, WebpayError, WebpayGateway
+from app.services.webpay_checkout import sign_checkout
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,8 @@ class PagoService:
         return [to_plan_read(plan) for plan in self._repository.list_planes(tipo)]
 
     def initiate(self, actor: Actor, payload: PagoIniciar) -> PagoIniciado:
+        if payload.client == "web" and not self._settings.web_return_url:
+            raise HTTPException(status_code=503, detail="El retorno de pagos web no está configurado.")
         plan = self._repository.get_plan(payload.plan_id)
         if plan is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan no encontrado.")
@@ -73,7 +76,8 @@ class PagoService:
         session_id = f"{'club' if club_id else 'user'}:{club_id or usuario_id}"
         try:
             creada = self._gateway.create_transaction(
-                buy_order, session_id, plan.precio, self._settings.return_url
+                buy_order, session_id, plan.precio,
+                self._settings.return_url + ("?client=web" if payload.client == "web" else "")
             )
         except WebpayError as error:
             logger.warning("Webpay could not create %s: %s", buy_order, error)
@@ -101,12 +105,27 @@ class PagoService:
             amount=transaccion.amount,
             token_ws=transaccion.token_ws,
             url=creada.url,
+            checkout_url=f"{self._settings.public_url}/api/v1/payments/webpay/checkout?ticket="
+            + sign_checkout(creada.token, creada.url),
+            environment="MOCK" if self._settings.mock_mode else self._settings.environment,
             status=transaccion.status,
             plan=to_plan_read(plan),
         )
 
     def confirm(self, actor: Actor, payload: PagoConfirmar) -> ResultadoPago:
         transaccion = self._find(actor, payload)
+        return self._confirm(transaccion, payload)
+
+    def confirm_browser(self, payload: PagoConfirmar) -> ResultadoPago:
+        # A browser callback has no login session. Its opaque transaction token
+        # locates the order; authorization still comes only from Transbank.
+        if not (payload.token_ws or payload.tbk_token) and not (
+            payload.tbk_orden_compra and payload.tbk_id_sesion
+        ):
+            raise HTTPException(status_code=400, detail="Retorno incompleto.")
+        return self._confirm(self._find(None, payload), payload)
+
+    def _confirm(self, transaccion: StoredTransaccion, payload: PagoConfirmar) -> ResultadoPago:
 
         # Idempotent: refreshing the return page, or Webpay returning twice,
         # shows the same receipt and never charges or extends anything again.
@@ -123,13 +142,21 @@ class PagoService:
             actual = self._repository.get_transaccion(token_ws=transaccion.token_ws)
             if actual is not None and actual.status != "PENDING":
                 return self._resultado(actual, self._suscripcion_de(actual))
-            logger.warning("Webpay could not commit %s: %s", transaccion.buy_order, error)
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="No se pudo confirmar el pago con Webpay. Inténtalo de nuevo.",
-            ) from error
+            # The PUT may have succeeded before its response was lost. Recover
+            # via GET; never mark a transport failure as a rejected payment.
+            try:
+                commit = self._gateway.transaction_status(transaccion.token_ws)
+                if commit.status not in {"AUTHORIZED", "FAILED", "REVERSED"}:
+                    raise WebpayError("Transaction has not finished")
+            except WebpayError:
+                logger.warning("Webpay could not commit %s: %s", transaccion.buy_order, error)
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="No se pudo confirmar el pago con Webpay. Inténtalo de nuevo.",
+                ) from error
 
-        if commit.buy_order != transaccion.buy_order or commit.amount != transaccion.amount:
+        if (commit.buy_order != transaccion.buy_order or commit.amount != transaccion.amount
+                or commit.session_id != transaccion.session_id):
             # Never activate benefits from an answer that is not about this order.
             logger.error(
                 "Webpay commit does not match order %s (amount %s vs %s)",
@@ -139,6 +166,8 @@ class PagoService:
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="La confirmación de Webpay no coincide con la orden de compra.",
             )
+        if commit.status not in {"AUTHORIZED", "FAILED", "REVERSED"}:
+            raise HTTPException(status_code=502, detail="El pago aún no tiene un resultado definitivo en Webpay.")
         return self._settle(
             transaccion, "APPROVED" if commit.approved else "REJECTED", _resultado_de(commit)
         )
@@ -185,7 +214,7 @@ class PagoService:
             )
         return actor.id, None
 
-    def _find(self, actor: Actor, payload: PagoConfirmar) -> StoredTransaccion:
+    def _find(self, actor: Actor | None, payload: PagoConfirmar) -> StoredTransaccion:
         if payload.abandonado and not payload.tbk_token:
             transaccion = self._repository.get_transaccion(buy_order=payload.tbk_orden_compra)
         else:
@@ -195,8 +224,9 @@ class PagoService:
         # Someone else's payment looks exactly like a missing one.
         if (
             transaccion is None
-            or transaccion.iniciada_por != actor.id
+            or (actor is not None and transaccion.iniciada_por != actor.id)
             or (payload.tbk_orden_compra and payload.tbk_orden_compra != transaccion.buy_order)
+            or (payload.tbk_id_sesion and payload.tbk_id_sesion != transaccion.session_id)
         ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Transacción no encontrada."
