@@ -164,20 +164,43 @@ async def mock_webpay_page(
     if created is None:
         return HTMLResponse(_page("Transacción no encontrada", "<p>El enlace no es válido.</p>"), 404)
 
-    def link(accion: str, texto: str) -> str:
-        query = urlencode({"token_ws": token, "accion": accion})
-        return f'<p><a href="/api/v1/payments/webpay/mock/decision?{query}">{texto}</a></p>'
-
+    monto = f"${created['amount']:,}".replace(",", ".")
     body = (
-        "<p><strong>Simulación de Webpay Plus.</strong> No se realiza ningún cobro.</p>"
-        f"<p>Orden de compra: {html.escape(created['buy_order'])}<br>"
-        f"Monto: ${created['amount']:,}".replace(",", ".")
-        + "</p>"
-        + link("aprobar", "Pagar (simular pago aprobado)")
-        + link("rechazar", "Simular pago rechazado")
-        + link("cancelar", "Anular compra y volver")
+        '<form method="post" action="/api/v1/payments/webpay/mock/pagar" class="tarjeta">'
+        f'<input type="hidden" name="token_ws" value="{html.escape(token)}">'
+        '<p class="resumen"><span>Comercio</span><strong>SportMatch</strong></p>'
+        f'<p class="resumen"><span>Orden</span><strong>{html.escape(created["buy_order"])}</strong></p>'
+        f'<p class="total"><span>Total a pagar</span><strong>{monto} CLP</strong></p>'
+        '<label>Número de tarjeta<input name="numero" inputmode="numeric" autocomplete="cc-number" '
+        'placeholder="4051 8856 0044 6623" required></label>'
+        '<div class="fila"><label>Vencimiento<input placeholder="MM/AA" autocomplete="cc-exp" required></label>'
+        '<label>CVV<input placeholder="123" inputmode="numeric" autocomplete="cc-csc" required></label></div>'
+        '<label>Nombre del titular<input placeholder="Como aparece en la tarjeta" autocomplete="cc-name" required></label>'
+        '<button type="submit">Pagar ' + monto + '</button>'
+        '</form>'
+        '<p class="ayuda">Entorno de prueba: no se realiza ningún cobro real. '
+        'Tarjeta 4051 8856 0044 6623 aprueba el pago; 5186 0595 5959 5609 lo rechaza.</p>'
+        + f'<p><a class="volver" href="/api/v1/payments/webpay/mock/decision?'
+        + urlencode({"token_ws": token, "accion": "cancelar"})
+        + '">Anular compra y volver a la app</a></p>'
     )
-    return HTMLResponse(_page("Webpay Plus (simulado)", body))
+    return HTMLResponse(_page("Pago seguro", body, _ESTILO_PAGO))
+
+
+@router.post("/webpay/mock/pagar", include_in_schema=False)
+async def mock_webpay_pagar(request: Request, mock: MockWebpay = Depends(get_mock_webpay)) -> Response:
+    """Simulated card payment: the card number only decides approve or reject in test mode.
+    It is never stored or sent anywhere."""
+    datos = parse_qs((await request.body())[:_MAX_RETURN_BODY].decode("utf-8", errors="ignore"))
+    token = datos.get("token_ws", [""])[0]
+    numero = re.sub(r"\D", "", datos.get("numero", [""])[0])
+    if not re.fullmatch(TOKEN_PATTERN, token) or mock.describe(token) is None:
+        return HTMLResponse(_page("Transacción no encontrada", "<p>El enlace no es válido.</p>"), 404)
+    accion = "aprobar" if numero == "4051885600446623" else "rechazar"
+    destino = mock.decide(token, accion)
+    if destino is None:
+        return HTMLResponse(_page("Transacción no encontrada", "<p>El enlace no es válido.</p>"), 404)
+    return RedirectResponse(destino, status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/webpay/mock/decision", include_in_schema=False)
@@ -190,11 +213,26 @@ def mock_webpay_decision(
     return RedirectResponse(destino, status_code=status.HTTP_303_SEE_OTHER)
 
 
-def _page(title: str, body: str) -> str:
+_ESTILO_PAGO = """
+body{margin:0;background:#eef1f5;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1c2430}
+.cabecera{background:#1c2430;color:#fff;padding:14px 18px;font-weight:700}
+.tarjeta{background:#fff;max-width:420px;margin:18px auto;padding:20px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+.resumen,.total{display:flex;justify-content:space-between;margin:8px 0;font-size:14px;color:#5b6676}
+.total{font-size:16px;color:#1c2430;border-top:1px solid #e3e7ee;padding-top:12px;margin-top:14px}
+label{display:block;font-size:13px;color:#5b6676;margin-top:12px}
+input{display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:11px;border:1px solid #cdd4de;border-radius:8px;font-size:16px}
+.fila{display:flex;gap:10px}.fila label{flex:1}
+button{width:100%;margin-top:18px;padding:14px;border:0;border-radius:10px;background:#0b7a5a;color:#fff;font-size:16px;font-weight:700}
+.ayuda{max-width:420px;margin:0 auto;padding:0 20px;font-size:12px;color:#5b6676}
+.volver{display:block;text-align:center;margin:18px;color:#5b6676;font-size:14px}
+"""
+
+
+def _page(title: str, body: str, estilo: str = "") -> str:
     return (
         '<!doctype html><html lang="es"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{html.escape(title)}</title></head>"
-        '<body style="font-family:sans-serif;max-width:28rem;margin:2rem auto;padding:0 1rem">'
-        f"<h1>{html.escape(title)}</h1>{body}</body></html>"
+        f"<title>{html.escape(title)}</title><style>{estilo}</style></head>"
+        '<body>'
+        f'<div class="cabecera">{html.escape(title)}</div>{body}</body></html>'
     )
