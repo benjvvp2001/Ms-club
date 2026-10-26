@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import html
 import re
+import secrets
+import jwt
 from typing import Annotated
 from urllib.parse import parse_qs, urlencode
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from starlette.concurrency import run_in_threadpool
+from pydantic import ValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
@@ -31,6 +35,7 @@ from app.schemas.pago import (
 )
 from app.services.pago_service import PagoService
 from app.services.webpay import MockWebpay
+from app.services.webpay_checkout import read_checkout
 
 # Plan payments with Webpay Plus (HU-40). Listing plans is public; paying and
 # reading one's own subscription need an access token. The return and mock
@@ -45,6 +50,25 @@ _RETURN_PARAMS = {
     "TBK_ID_SESION": ("tbk_id_sesion", re.compile(SESSION_PATTERN)),
 }
 _MAX_RETURN_BODY = 4096
+
+
+@router.get("/webpay/checkout", include_in_schema=False)
+def checkout(ticket: str = Query(max_length=4096)) -> Response:
+    try:
+        data = read_checkout(ticket)
+    except jwt.PyJWTError:
+        return HTMLResponse(_page("Enlace vencido", "<p>Vuelve a SportMatch para iniciar el pago.</p>"), 400)
+    nonce = secrets.token_urlsafe(24)
+    body = (
+        f'<form id="webpay" method="POST" action="{html.escape(data["url"], quote=True)}">'
+        f'<input type="hidden" name="token_ws" value="{html.escape(data["token_ws"], quote=True)}">'
+        '<p>Continúa a Webpay para completar el pago.</p><button type="submit">Ir a Webpay</button></form>'
+        f'<script nonce="{nonce}">document.getElementById("webpay").submit();</script>'
+    )
+    return HTMLResponse(_page("Pago con Webpay", body), headers={
+        "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+        "Content-Security-Policy": f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
+    })
 
 
 @router.get(
@@ -123,12 +147,11 @@ def my_subscription(
     summary="Retorno de Webpay Plus",
 )
 async def webpay_return(
-    request: Request, settings: WebpaySettings = Depends(get_webpay_settings_dep)
+    request: Request, settings: WebpaySettings = Depends(get_webpay_settings_dep),
+    service: PagoService = Depends(get_pago_service),
 ) -> Response:
-    """Where Webpay sends the user's browser (GET, or POST in Transbank's
-    integration environment). It does not trust or act on anything: it only
-    passes the well-formed parameters on to the app, which then calls /commit
-    with the user's session."""
+    """Confirm with Transbank before redirecting, even if the login expired.
+    Clients can retry /commit safely to retrieve their authenticated receipt."""
     received: dict[str, str] = dict(request.query_params)
     if request.method == "POST":
         body = (await request.body())[:_MAX_RETURN_BODY].decode("utf-8", errors="ignore")
@@ -140,10 +163,23 @@ async def webpay_return(
     }
     if not forwarded:
         forwarded = {"error": "parametros"}
-    separator = "&" if "?" in settings.frontend_return_url else "?"
+    else:
+        try:
+            await run_in_threadpool(service.confirm_browser, PagoConfirmar(**forwarded))
+        except (HTTPException, ValidationError):
+            # Do not invent a successful result on errors. The authenticated
+            # result screen will retrieve or retry the same transaction.
+            pass
+    destination = settings.frontend_return_url
+    if request.query_params.get("client") == "web":
+        if not settings.web_return_url:
+            return HTMLResponse(_page("Pago", "<p>El retorno web no está configurado.</p>"), 503)
+        destination = settings.web_return_url
+    separator = "&" if "?" in destination else "?"
     return RedirectResponse(
-        f"{settings.frontend_return_url}{separator}{urlencode(forwarded)}",
+        f"{destination}{separator}{urlencode(forwarded)}",
         status_code=status.HTTP_303_SEE_OTHER,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
     )
 
 

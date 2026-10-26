@@ -890,6 +890,23 @@ class MockClubRepository:
         assert convocatoria is not None
         return convocatoria
 
+    def set_chat_postulantes(
+        self, club_id: UUID, convocatoria_id: UUID, habilitado: bool
+    ) -> StoredConvocatoria | None:
+        row = self._convocatorias.get(convocatoria_id)
+        if row is None or row["club_id"] != club_id:
+            return None
+        row["chat_postulantes_habilitado"] = habilitado
+        return self.get_convocatoria(convocatoria_id, include_inactive_clubs=True)
+
+    def chat_habilitado_para(self, club_id: UUID, usuario_id: UUID) -> bool:
+        return all(
+            self._convocatorias[p["convocatoria_id"]].get("chat_postulantes_habilitado", True)
+            for p in self._postulaciones.values()
+            if p["usuario_id"] == usuario_id and p["estado"] != "RECHAZADO"
+            and self._convocatorias[p["convocatoria_id"]]["club_id"] == club_id
+        )
+
     def _stored(
         self, row: dict[str, Any], *, active_clubs_only: bool = True
     ) -> StoredConvocatoria | None:
@@ -1005,7 +1022,8 @@ class MockClubRepository:
             )
         if estado == anterior:
             return "sin_cambios", self._stored_postulacion(row)
-        self.outbox.append(evento)
+        if evento is not None:
+            self.outbox.append(evento)
         return "actualizada", self._stored_postulacion(row)
 
     def _sin_postulacion_activa(self, club_id: UUID, usuario_id: UUID) -> None:

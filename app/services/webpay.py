@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import secrets
+import re
 import threading
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -59,6 +61,8 @@ class WebpayGateway(Protocol):
 
     def commit_transaction(self, token_ws: str) -> WebpayCommit: ...
 
+    def transaction_status(self, token_ws: str) -> WebpayCommit: ...
+
     def close(self) -> None: ...
 
 
@@ -109,20 +113,29 @@ class TransbankWebpay:
         token, url = body.get("token"), body.get("url")
         if (
             not isinstance(token, str)
-            or not 1 <= len(token) <= 64
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", token)
             or not isinstance(url, str)
-            or not url.startswith("https://")
+            or not url.startswith(f"{str(self._client.base_url).rstrip('/')}/webpayserver/")
         ):
             raise WebpayError("Webpay answered an unexpected create-transaction response")
         return WebpayTransaction(token=token, url=url)
 
     def commit_transaction(self, token_ws: str) -> WebpayCommit:
         body = self._request("PUT", f"{_API}/{token_ws}")
+        return self._read_result(body)
+
+    def transaction_status(self, token_ws: str) -> WebpayCommit:
+        return self._read_result(self._request("GET", f"{_API}/{token_ws}"))
+
+    def _read_result(self, body: dict[str, Any]) -> WebpayCommit:
         try:
+            amount = Decimal(str(body["amount"]))
+            if not amount.is_finite() or amount < 0 or amount != amount.to_integral_value():
+                raise ValueError("Expected whole Chilean pesos")
             return WebpayCommit(
                 buy_order=str(body["buy_order"]),
                 session_id=str(body["session_id"]),
-                amount=int(round(float(body["amount"]))),
+                amount=int(amount),
                 status=str(body["status"]),
                 response_code=_optional_int(body.get("response_code")),
                 authorization_code=_optional_text(body.get("authorization_code")),
@@ -131,7 +144,7 @@ class TransbankWebpay:
                 installments_number=_optional_int(body.get("installments_number")),
                 transaction_date=_optional_datetime(body.get("transaction_date")),
             )
-        except (KeyError, TypeError, ValueError) as error:
+        except (KeyError, TypeError, ValueError, InvalidOperation) as error:
             raise WebpayError("Webpay answered an unexpected commit response") from error
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
@@ -151,7 +164,12 @@ class TransbankWebpay:
 
 
 def _optional_int(value: Any) -> int | None:
-    return None if value is None else int(value)
+    if value is None:
+        return None
+    number = Decimal(str(value))
+    if not number.is_finite() or number != number.to_integral_value():
+        raise ValueError("Expected integer")
+    return int(number)
 
 
 def _optional_text(value: Any) -> str | None:
@@ -188,6 +206,7 @@ class MockWebpay:
         self._created: dict[str, dict[str, Any]] = {}
         self._decisions: dict[str, str] = {}
         self._committed: set[str] = set()
+        self._results: dict[str, WebpayCommit] = {}
 
     def close(self) -> None:
         pass
@@ -227,7 +246,8 @@ class MockWebpay:
                 }
             else:
                 params = {"token_ws": token}
-            return f"{created['return_url']}?{urlencode(params)}"
+            separator = "&" if "?" in created['return_url'] else "?"
+            return f"{created['return_url']}{separator}{urlencode(params)}"
 
     def commit_transaction(self, token_ws: str) -> WebpayCommit:
         with self._lock:
@@ -241,7 +261,7 @@ class MockWebpay:
                 raise WebpayError("The transaction was already committed")
             self._committed.add(token_ws)
         approved = decision == "aprobar"
-        return WebpayCommit(
+        result = WebpayCommit(
             buy_order=created["buy_order"],
             session_id=created["session_id"],
             amount=created["amount"],
@@ -253,6 +273,15 @@ class MockWebpay:
             installments_number=0 if approved else None,
             transaction_date=datetime.now().astimezone(),
         )
+        with self._lock:
+            self._results[token_ws] = result
+        return result
+
+    def transaction_status(self, token_ws: str) -> WebpayCommit:
+        with self._lock:
+            if token_ws in self._results:
+                return self._results[token_ws]
+        raise WebpayError("Transaction has not been committed")
 
 
 def build_webpay(settings: WebpaySettings) -> WebpayGateway:

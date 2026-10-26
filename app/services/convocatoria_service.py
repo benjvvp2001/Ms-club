@@ -99,4 +99,5 @@ def to_convocatoria_read(convocatoria: StoredConvocatoria) -> ConvocatoriaRead:
         comuna=convocatoria.comuna,
         estado=convocatoria.estado,
         fecha_creacion=convocatoria.fecha_creacion,
+        chat_postulantes_habilitado=convocatoria.chat_postulantes_habilitado,
     )

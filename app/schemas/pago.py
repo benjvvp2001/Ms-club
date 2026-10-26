@@ -27,6 +27,7 @@ class PagoIniciar(APIModel):
     """
 
     plan_id: int = Field(ge=1)
+    client: Literal["app", "web"] = "app"
 
 
 class PagoConfirmar(APIModel):
@@ -75,6 +76,8 @@ class PagoIniciado(APIModel):
     amount: int
     token_ws: str
     url: str
+    checkout_url: str
+    environment: Literal["MOCK", "INTEGRATION", "PRODUCTION"]
     status: EstadoTransaccion
     plan: PlanRead
 

@@ -113,7 +113,7 @@ def _convocatoria_select(active_clubs_only: bool = True) -> str:
            d.id AS deporte_id, d.nombre AS deporte_nombre, d.descripcion AS deporte_descripcion,
            v.titulo, v.descripcion, v.categoria_edad, v.edad_minima, v.edad_maxima,
            v.fecha_prueba, v.requisitos, v.cupos, v.direccion, v.comuna, v.cerrada_en,
-           v.fecha_creacion, {_ESTADO} AS estado,
+           v.fecha_creacion, v.chat_postulantes_habilitado, {_ESTADO} AS estado,
            (SELECT count(*) FROM postulacion_convocatoria p
             WHERE p.convocatoria_id = v.id AND p.estado <> 'RECHAZADO') AS postulaciones_activas
     FROM convocatoria v
@@ -281,7 +281,7 @@ _HILO_POSTULANTE = _postulante_activo("h.club_id", "h.deportista_id")
 
 _CONVOCATORIA_COLUMNS = frozenset({
     "deporte_id", "titulo", "descripcion", "categoria_edad", "edad_minima", "edad_maxima",
-    "fecha_prueba", "requisitos", "cupos", "direccion", "comuna",
+    "fecha_prueba", "requisitos", "cupos", "direccion", "comuna", "chat_postulantes_habilitado",
 })
 
 
@@ -1424,6 +1424,37 @@ class PostgresClubRepository:
         assert convocatoria is not None
         return convocatoria
 
+    def set_chat_postulantes(
+        self, club_id: UUID, convocatoria_id: UUID, habilitado: bool
+    ) -> StoredConvocatoria | None:
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                """
+                UPDATE convocatoria
+                SET chat_postulantes_habilitado = %s, fecha_actualizacion = now()
+                WHERE id = %s AND club_id = %s
+                """,
+                (habilitado, convocatoria_id, club_id),
+            )
+            if cur.rowcount == 0:
+                return None
+        return self.get_convocatoria(convocatoria_id, include_inactive_clubs=True)
+
+    def chat_habilitado_para(self, club_id: UUID, usuario_id: UUID) -> bool:
+        with self._pool.connection() as conn:
+            return bool(conn.execute(
+                """
+                SELECT NOT EXISTS (
+                    SELECT 1
+                    FROM postulacion_convocatoria p
+                    JOIN convocatoria v ON v.id = p.convocatoria_id
+                    WHERE v.club_id = %(club_id)s AND p.usuario_id = %(usuario_id)s
+                      AND p.estado <> 'RECHAZADO' AND NOT v.chat_postulantes_habilitado
+                )
+                """,
+                {"club_id": club_id, "usuario_id": usuario_id},
+            ).fetchone()[0])
+
 
     # -- postulaciones (HU-33) ----------------------------------------------------
 
@@ -1606,7 +1637,7 @@ class PostgresClubRepository:
                 result = "sin_cambios" if estado == anterior else "actualizada"
                 if estado == "RECHAZADO":
                     _sin_postulacion_activa(conn, club_id, usuario_id)
-            if result == "actualizada":
+            if result == "actualizada" and evento is not None:
                 conn.execute(
                     sql.SQL(
                         "INSERT INTO {} (user_id, kind, title, body, data) VALUES (%s, %s, %s, %s, %s)"

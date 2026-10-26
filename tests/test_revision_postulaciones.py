@@ -201,7 +201,7 @@ def test_owner_of_an_inactive_club_still_reviews():
     "body",
     [
         {},
-        {"estado": "PENDIENTE"},
+        {"estado": "EN_ESPERA"},
         {"estado": "EN_REVISION"},
         {"estado": "aceptado"},
         {"estado": "ACEPTADO", "comentario": "x" * 1001},
@@ -214,6 +214,27 @@ def test_invalid_review_is_400_and_changes_nothing(body):
     assert setup.review(postulacion["id"], body).status_code == 400
     assert setup.candidates().json()["items"][0]["estado"] == "PENDIENTE"
     assert setup.repository.outbox == []
+
+
+def test_club_puts_an_application_back_on_hold_without_notice():
+    setup = Review(cupos=1)
+    _, _, postulacion = setup.applied()
+    assert setup.review(postulacion["id"], {"estado": "PRESELECCIONADO"}).status_code == 200
+    assert len(setup.repository.outbox) == 1  # the preselection notice
+    response = setup.review(postulacion["id"], {"estado": "PENDIENTE", "comentario": "Esperando cupo"})
+    assert response.status_code == 200, response.text
+    assert response.json()["estado"] == "PENDIENTE" and response.json()["comentario_club"] == "Esperando cupo"
+    assert len(setup.repository.outbox) == 1  # en espera does not notify
+
+
+def test_leaving_rejected_for_pending_takes_a_cupo_again():
+    setup = Review(cupos=1)
+    _, _, ana = setup.applied()
+    setup.review(ana["id"], {"estado": "RECHAZADO"})
+    _, _, bea = setup.applied()  # the rejection freed the only cupo: Bea takes it
+    assert setup.review(ana["id"], {"estado": "PENDIENTE"}).status_code == 409
+    assert setup.review(bea["id"], {"estado": "RECHAZADO"}).status_code == 200
+    assert setup.review(ana["id"], {"estado": "PENDIENTE"}).status_code == 200
 
 
 def test_review_of_unknown_or_malformed_postulacion():

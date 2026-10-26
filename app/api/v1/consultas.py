@@ -63,7 +63,9 @@ def my_messages(
     status_code=status.HTTP_201_CREATED,
     summary="Escribir al club",
     description="Crea la conversación si no existe. Repetir el mismo client_message_id "
-    "devuelve el mismo mensaje. 404 si el club no existe o está inactivo.",
+    "devuelve el mismo mensaje. 404 si el club no existe o está inactivo. 403 si no es "
+    "postulante activo, o si el club desactivó el chat de una convocatoria a la que postuló "
+    "(solo puede leer).",
 )
 def send_message(
     club_id: UUID,

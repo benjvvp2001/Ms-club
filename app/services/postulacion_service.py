@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 
 from app.core.security import Actor
 from app.repositories.base import ClubRepository, OutboxEvent, StoredConvocatoria, StoredPostulacion
+from app.schemas.convocatoria import ConvocatoriaRead
 from app.schemas.postulacion import (
     Antecedente,
     CandidatoFilters,
@@ -74,7 +75,8 @@ class PostulacionService:
     # -- revisión por el club (HU-34) ---------------------------------------------------
     # Only an administrator of the club that owns the convocatoria; the club
     # may be inactive (its administrators still manage it) and the tryout may be over
-    # (selections are confirmed after it).
+    # (selections are confirmed after it). The club's decision is one of
+    # PENDIENTE (en espera), PRESELECCIONADO, ACEPTADO or RECHAZADO.
 
     def list_candidatos(
         self, actor: Actor, convocatoria_id: UUID, filters: CandidatoFilters
@@ -117,6 +119,17 @@ class PostulacionService:
             )
         return to_candidato_read(actualizada)
 
+    def set_chat_postulantes(
+        self, actor: Actor, club_id: UUID, convocatoria_id: UUID, habilitado: bool
+    ) -> ConvocatoriaRead:
+        """The club decides whether its applicants may write in their consulta
+        for this convocatoria. Only an administrator of the owning club."""
+        require_managed_club(self._repository, actor, club_id)
+        convocatoria = self._repository.set_chat_postulantes(club_id, convocatoria_id, habilitado)
+        if convocatoria is None:
+            raise _convocatoria_not_found()
+        return to_convocatoria_read(convocatoria)
+
     def my_postulaciones(self, actor: Actor, filters: PostulacionFilters) -> PostulacionPage:
         postulaciones, total = self._repository.list_postulaciones(actor.id, filters)
         return PostulacionPage(
@@ -145,8 +158,11 @@ def _check_age(convocatoria: StoredConvocatoria, perfil: PerfilDeportivo) -> Non
         )
 
 
-def _aviso(postulacion: StoredPostulacion, estado: str) -> OutboxEvent:
-    """Notification for the athlete; written only if the estado really changes."""
+def _aviso(postulacion: StoredPostulacion, estado: str) -> OutboxEvent | None:
+    """Notification for the athlete; written only if the estado really changes.
+    PENDIENTE (en espera) has no notice."""
+    if estado not in _AVISOS:
+        return None
     convocatoria = postulacion.convocatoria
     prueba = f"«{convocatoria.titulo}»" if convocatoria.titulo else (
         f"la prueba de {convocatoria.deporte.nombre} {convocatoria.categoria_edad}"

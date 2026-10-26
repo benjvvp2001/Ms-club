@@ -80,6 +80,8 @@ class ConsultaService:
         club = self._active_club(club_id)
         if not self._repository.es_postulante_activo(club.id, actor.id):
             raise not_postulante()
+        if not self._repository.chat_habilitado_para(club.id, actor.id):
+            raise chat_cerrado()
         hilo = self._repository.get_hilo_deportista(club.id, actor.id)
         if hilo is None:
             nombre = account_name(self._names, actor, ATHLETE_NAME_FALLBACK)
@@ -218,6 +220,14 @@ def not_postulante() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Solo puedes escribir a clubes a los que postulaste.",
+    )
+
+
+def chat_cerrado() -> HTTPException:
+    """The club turned the chat off for a convocatoria the athlete applied to (011)."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="El club no permite escribir en el chat de esta convocatoria: solo puedes leer.",
     )
 
 
