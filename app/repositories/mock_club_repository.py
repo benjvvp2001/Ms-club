@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from app.repositories.base import (
+    PlanInactivoError,
+    PlanNombreDuplicadoError,
     AccesoDeportista,
     AccesoHilo,
     AgregarMiembroResult,
@@ -1120,6 +1122,76 @@ class MockClubRepository:
         plan = self._planes.get(plan_id)
         return plan if plan is not None and plan.is_active else None
 
+    # -- gestion de planes y convenios (HU-56) ----------------------------------------
+
+    def get_plan_any(self, plan_id: int) -> StoredPlan | None:
+        plan = self._planes.get(plan_id)
+        return replace(plan) if plan is not None else None
+
+    def _vigentes(self, plan_id: int) -> int:
+        now = datetime.now(timezone.utc)
+        return sum(1 for row in self._suscripciones.values()
+                   if row["plan"].id == plan_id and row["fecha_fin"] > now)
+
+    def list_planes_admin(
+        self, *, estado: str, tipo: str | None, categoria: str | None, limit: int, offset: int
+    ) -> tuple[list[StoredPlan], int]:
+        matches = [
+            p for p in self._planes.values()
+            if (estado == "todos" or p.is_active == (estado == "activo"))
+            and tipo in (None, p.tipo) and categoria in (None, p.categoria)
+        ]
+        matches.sort(key=lambda p: (p.fecha_creacion or datetime.min.replace(tzinfo=timezone.utc), p.id), reverse=True)
+        page = matches[offset : offset + limit]
+        return [replace(p, suscripciones_vigentes=self._vigentes(p.id)) for p in page], len(matches)
+
+    def _name_taken(self, nombre: str, except_id: int | None = None) -> bool:
+        wanted = " ".join(nombre.split()).lower()
+        return any(p.is_active and p.id != except_id and " ".join(p.nombre.split()).lower() == wanted
+                   for p in self._planes.values())
+
+    def create_plan(self, values: dict[str, Any], *, audit) -> StoredPlan:
+        if self._name_taken(values["nombre"]):
+            raise PlanNombreDuplicadoError
+        plan_id = max(self._planes, default=0) + 1
+        plan = StoredPlan(
+            id=plan_id, nombre=values["nombre"], tipo=values["tipo"], precio=values["precio"],
+            duracion_dias=values["duracion_dias"], descripcion=values.get("descripcion"),
+            categoria=values.get("categoria", "PLAN"), beneficios=tuple(values.get("beneficios", ())),
+            institucion=values.get("institucion"),
+            fecha_creacion=datetime.now(timezone.utc),
+        )
+        audit("PLAN_CREATED", None, plan)       # raises -> nothing saved
+        self._planes[plan_id] = plan
+        return replace(plan)
+
+    def update_plan(self, plan_id: int, changes: dict[str, Any], *, audit):
+        before = self._planes.get(plan_id)
+        if before is None:
+            return None
+        if not before.is_active:
+            raise PlanInactivoError
+        if "nombre" in changes and self._name_taken(changes["nombre"], except_id=plan_id):
+            raise PlanNombreDuplicadoError
+        values = dict(changes)
+        if "beneficios" in values:
+            values["beneficios"] = tuple(values["beneficios"])
+        after = replace(before, **values)
+        audit("PLAN_UPDATED", replace(before), after)
+        self._planes[plan_id] = after
+        return replace(before), replace(after)
+
+    def deactivate_plan(self, plan_id: int, *, audit):
+        before = self._planes.get(plan_id)
+        if before is None:
+            return None
+        if not before.is_active:
+            raise PlanInactivoError
+        after = replace(before, is_active=False)
+        audit("PLAN_DEACTIVATED", replace(before), after)
+        self._planes[plan_id] = after
+        return replace(before), replace(after)
+
     def get_suscripcion(
         self, *, usuario_id: UUID | None = None, club_id: UUID | None = None
     ) -> StoredSuscripcion | None:
@@ -1130,8 +1202,8 @@ class MockClubRepository:
         if row is None:
             return None
         estado = "ACTIVE" if row["fecha_fin"] > datetime.now(timezone.utc) else "EXPIRED"
-        return StoredSuscripcion(plan=self._planes[row["plan_id"]], estado=estado, **{
-            k: v for k, v in row.items() if k not in {"plan_id", "ultima_transaccion_id"}
+        return StoredSuscripcion(plan=row["plan"], estado=estado, **{
+            k: v for k, v in row.items() if k not in {"plan", "ultima_transaccion_id"}
         })
 
     def create_transaccion(self, values: dict[str, Any]) -> StoredTransaccion:
@@ -1141,11 +1213,15 @@ class MockClubRepository:
         now = self._tick()
         transaccion = StoredTransaccion(
             id=uuid4(),
-            plan=self._planes[values["plan_id"]],
+            # What is being bought, frozen now (the same fields the PostgreSQL repository copies).
+            plan=replace(
+                self._planes[values["plan_id"]], precio=values["amount"], nombre=values["plan_nombre"],
+                duracion_dias=values["duracion_dias"], beneficios=tuple(values["beneficios"]),
+            ),
             status="PENDING",
             fecha_creacion=now,
             fecha_actualizacion=now,
-            **{k: v for k, v in values.items() if k != "plan_id"},
+            **{k: v for k, v in values.items() if k not in {"plan_id", "plan_nombre", "duracion_dias", "beneficios"}},
         )
         self._transacciones[transaccion.id] = transaccion
         return replace(transaccion)
@@ -1189,13 +1265,13 @@ class MockClubRepository:
         if row is None:
             self._suscripciones[key] = {
                 "id": uuid4(), "usuario_id": transaccion.usuario_id, "club_id": transaccion.club_id,
-                "plan_id": transaccion.plan.id, "fecha_inicio": now, "fecha_fin": now + dias,
+                "plan": replace(transaccion.plan), "fecha_inicio": now, "fecha_fin": now + dias,
                 "ultima_transaccion_id": transaccion.id,
             }
             return
         if row["fecha_fin"] <= now:
             row["fecha_inicio"] = now
-        row["plan_id"] = transaccion.plan.id
+        row["plan"] = replace(transaccion.plan)
         row["fecha_fin"] = max(row["fecha_fin"], now) + dias
         row["ultima_transaccion_id"] = transaccion.id
 

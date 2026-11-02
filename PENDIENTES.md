@@ -487,6 +487,27 @@ gateway**, que todavía no reenvía WebSockets.
       mejor en el gateway.
 - [ ] Sin métricas de conexiones abiertas, eventos enviados ni clientes soltados.
 
+### Sitio web de clubes (`sportmatch-web`)
+- [x] **Registro de clubes desde la web** (`/registro`): cuenta de representante (`POST /api/v1/users/auth/register-club`, rol
+      `club_admin`, nueva en Ms_Users y en el gateway) + código del correo + `POST /api/v1/clubs`, que guarda el club en ms-club.
+      Tests: Ms_Users 5 nuevos (suite completa pasa), gateway 1 nuevo (151 pasan), web con `tsc` y `eslint` limpios.
+      **No probado de punta a punta contra PostgreSQL**: depende de que exista la base de ms-club (primer punto de abajo).
+- [ ] **Para que el registro se guarde de verdad:** como `postgres`, ejecutar en `sportmatch_clubs` `db/00_create_database.sql` y las
+      migraciones `001` a `005` (la `006` es de pagos y puede esperar); Ms_Users debe tener el rol `club_admin` en su tabla `rol`.
+- [x] El sitio dejó los datos simulados: inicio de sesión, directorio y perfil público, crear y editar el club,
+      convocatorias, postulantes y avisos usan el Gateway (`NEXT_PUBLIC_API_URL`). Probado en un navegador real (Edge)
+      contra Gateway, Ms_Users y ms-club **en memoria**: 41 de 41 comprobaciones, repetidas. Detalle en `sportmatch-web/README.md`.
+- [ ] **Falta conectar ms-club a su base de datos real** (`sportmatch_clubs`): sigue pendiente la decisión de roles y
+      migraciones con el equipo. Hasta entonces el sitio no funciona contra tus bases; solo contra servicios en memoria.
+- [ ] Poner el origen del sitio en `CORS_ALLOWED_ORIGINS` del Gateway (`http://localhost:3000` en desarrollo; el dominio real en producción).
+- [ ] Dentro del sitio faltan: planes y pago con Webpay (HU-40), el retorno del pago a una página del sitio, y el chat.
+- [ ] Logo por enlace `https`: falta el almacenamiento de archivos para subirlo desde el sitio (ver 2.8 de DUDAS).
+- [ ] La sesión dura 30 minutos y no se renueva sola; al vencer vuelve al inicio de sesión. Evaluar un token de renovación.
+- [ ] El token vive en `sessionStorage` (legible por scripts de la página). Si se quiere más seguridad, pasar a una cookie `httpOnly`
+      servida por el propio sitio.
+- [ ] Alta de cuentas `club_admin`: sigue siendo manual (ver 2.10 de DUDAS).
+- [ ] El administrador solo ve cifras globales (clubes, verificados, convocatorias abiertas): falta el panel para verificar o desactivar clubes.
+
 ## 14. Filtro por deporte
 
 - [x] `GET /api/v1/clubs/deportes` lista el catálogo y se puede filtrar por `deporte_id`.
@@ -528,3 +549,49 @@ gateway**, que todavía no reenvía WebSockets.
 - `membresia` y `pago`: según `Ms_Users/db/README.md` pertenecen a este servicio. La HU-40
   creó `transaccion_pago` y `suscripcion` como reemplazo propio; las `membresia`/`pago`
   de la base `sportmatch_users` siguen sin tocar (ver la sección 9).
+
+## 17. Gestión de planes y convenios (HU-56)
+
+Informe completo: `docs/informes/2026-11-02-HU-56-planes-y-convenios.md`. Los planes, suscripciones y pagos viven
+**solo en esta base** (`plan_suscripcion`, `suscripcion`, `transaccion_pago`); las tablas `plan`/`membresia`/`pago`
+de los diagramas de Ms_Users no existen en la base `sportmach_users`.
+
+Decisiones por confirmar (cada una es fácil de cambiar):
+
+| Decisión | Motivo | Dónde cambiarla |
+|---|---|---|
+| "Convenio" = un plan con `categoria = CONVENIO` (se compra igual que un plan; `tipo` sigue siendo quién lo compra). El concepto no existía en el modelo. | Lo más simple y sin romper la lógica de compra por tipo | `012_gestion_planes.sql`, `schemas/pago.py` (`PlanCategoria`) |
+| El precio es un entero en pesos (sin decimales), de 0 a 10.000.000. 0 = gratuito y no se paga con Webpay (409). | CLP no tiene decimales y Webpay cobra montos enteros; `transaccion_pago.amount` exige > 0 | `schemas/plan_admin.py` (`PRECIO_MAX`), `pago_service.initiate` |
+| Duración de 1 a 366 días (el tope que ya tenía la tabla). | Coherente con la tabla | `schemas/plan_admin.py`, `012` |
+| Errores de validación = 400 (no 422), como el resto de este servicio, y sin repetir el valor enviado. | Convención de ms-club | `main.py` (`invalid_request`) |
+| Un plan desactivado no se reactiva ni se edita; para volver a ofrecerlo se crea otro (el nombre queda libre). Sin ruta de reactivar. | Más simple y seguro; la reactivación era opcional | `plan_admin_service.py` |
+| No hay renovación automática en ningún servicio: una suscripción solo se extiende con un pago nuevo, y un plan desactivado no se puede contratar (404), así que no se renueva. | El campo `renovacion_automatica` de los diagramas no existe | `pago_service.initiate` |
+| Un pago ya iniciado antes de desactivar el plan se acepta al confirmarse (el dinero ya se cobró). | No cobrar sin entregar el servicio | `pago_service._confirm` |
+| El nombre es único entre planes activos, sin distinguir mayúsculas ni espacios; se reemplazó `UNIQUE (tipo, nombre)`. | Pedido de la HU | `012` (`plan_suscripcion_nombre_activo_uq`) |
+| El tipo y la categoría de un plan no se editan. | Cambiar quién lo compra rompería suscripciones existentes | `PlanUpdate` |
+| La auditoría se escribe en Ms_Users por su endpoint interno **dentro** de la transacción del cambio, antes de confirmar. Si falla, 503 y nada se guarda. Si la auditoría se escribe y el `COMMIT` falla después, queda una fila de auditoría sin cambio (el lado seguro). | El cambio y la auditoría están en bases distintas | `plan_audit.py`, repositorios |
+
+Pendientes:
+
+- [ ] **Desplegar con el secreto**: `INTERNAL_SERVICE_TOKEN` (mínimo 32 bytes, el mismo que Ms_Users) ahora debe estar en ms-club
+      (`compose.yaml` ya lo pasa). Sin él, crear, editar y desactivar planes responde 503.
+- [ ] Aplicar `db/migrations/012_gestion_planes.sql` como `postgres` en cada ambiente (la aplica `clubs_migrate` en Docker).
+      El rol `sportmatch_clubs` queda con INSERT y UPDATE sobre `plan_suscripcion`, nunca DELETE.
+- [ ] El seed `db/seeds/demo_planes.sql` ya no usa `ON CONFLICT (tipo, nombre)` (esa restricción desaparece con la 012).
+- [ ] Web (`sportmatch-web`): solo existe el cliente `lib/planesAdmin.ts`; falta la pantalla de planes del panel. En la web no
+      está instalado `node_modules`, así que el cliente se comprobó con el `tsc` de la app.
+- [x] El catálogo de la app (`Frontend-SportMatch-APP/services/planes.ts`) ya sale de `/payments/plans`: lista real, con categoría,
+      beneficios, institución y duración; un plan desactivado no aparece y un convenio nuevo sí; si la API falla muestra un error
+      (no vuelve a planes fijos). Solo "Gratuito" sigue siendo local, y únicamente si el backend no tiene un plan gratuito propio.
+      Pendiente de comprobar en un teléfono o emulador: el aspecto de las tarjetas y el pago real con Webpay.
+- [ ] Una cuenta con rol `admin` es la única autorizada; no hay roles intermedios (por ejemplo, un "gestor de planes").
+- [ ] `docs/webpay/README.md` dice que el panel web `/planes` usa `lib/planes.mock.ts`; ese archivo ya no existe.
+
+### Institución de un convenio y panel web (2026-11-02)
+
+- [x] `db/migrations/013_plan_institucion.sql`: columna opcional `plan_suscripcion.institucion` (hasta 80 caracteres, solo para
+      `categoria = CONVENIO`, con CHECK). La API la acepta en crear y editar (`null` la borra), la muestra el catálogo público y la
+      auditoría registra su cambio solo por nombre de campo (`campos`), nunca el texto libre. Aplicar como `postgres` en cada ambiente.
+- [ ] En el panel web, un convenio ya contratado conserva su institución; no hay pantalla para ver quién tiene cada suscripción
+      (la API de administración solo informa el número de suscripciones vigentes por plan).
+- [ ] Sin reactivar planes: la web no ofrece "Reactivar" porque el backend no lo tiene (se crea otro plan).

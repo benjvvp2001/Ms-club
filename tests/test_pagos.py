@@ -85,8 +85,8 @@ def test_plans_are_public_active_only_and_cheapest_first():
     assert response.status_code == 200
     assert [(p["id"], p["precio"]) for p in response.json()] == [(1, 3990), (3, 14990), (2, 39990)]
     assert response.json()[0] == {
-        "id": 1, "nombre": "Deportista Mensual", "tipo": "USUARIO",
-        "descripcion": "Para deportistas", "precio": 3990, "duracion_dias": 30,
+        "id": 1, "nombre": "Deportista Mensual", "tipo": "USUARIO", "categoria": "PLAN",
+        "descripcion": "Para deportistas", "precio": 3990, "duracion_dias": 30, "beneficios": [], "institucion": None,
     }
     only_club = pagos.client.get(f"{PAY}/plans", params={"tipo": "CLUB"}).json()
     assert [p["id"] for p in only_club] == [3]

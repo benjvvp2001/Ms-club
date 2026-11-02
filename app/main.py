@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -17,6 +18,7 @@ from app.api.v1.comunicados import router as comunicados_router
 from app.api.v1.consultas import router as consultas_router
 from app.api.v1.convocatorias import router as convocatorias_router
 from app.api.v1.pagos import router as pagos_router
+from app.api.v1.planes_admin import router as planes_admin_router
 from app.api.v1.postulaciones import router as postulaciones_router
 from app.core.config import (
     WebpaySettings,
@@ -30,6 +32,7 @@ from app.database.session import check_connection, create_pool
 from app.repositories.base import ClubRepository
 from app.repositories.postgres_club_repository import PostgresClubRepository
 from app.services import canal_inactividad
+from app.services.plan_audit import InternalAuditClient, PlanAuditor
 from app.services.users_client import AthleteProfiles, UsersClient
 from app.services.webpay import WebpayGateway, build_webpay
 
@@ -46,6 +49,7 @@ def create_app(
     webpay: WebpayGateway | None = None,
     webpay_settings: WebpaySettings | None = None,
     inactividad: bool | None = None,
+    plan_auditor: PlanAuditor | None = None,
 ) -> FastAPI:
     """Create the service without routes outside the approved clubs prefix.
 
@@ -84,6 +88,9 @@ def create_app(
                 trust_env=False,
             )
             app.state.users = UsersClient(http_client)
+            if plan_auditor is None:
+                # HU-56: plan changes are audited in Ms_Users with the shared secret (INTERNAL_SERVICE_TOKEN).
+                app.state.plan_auditor = InternalAuditClient(http_client, os.getenv("INTERNAL_SERVICE_TOKEN"))
         if owns_webpay:
             app.state.webpay_settings = get_webpay_settings()
             app.state.webpay = build_webpay(app.state.webpay_settings)
@@ -122,13 +129,18 @@ def create_app(
         app.state.webpay = webpay
     if webpay_settings is not None:
         app.state.webpay_settings = webpay_settings
+    if plan_auditor is not None:
+        app.state.plan_auditor = plan_auditor
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, error: RequestValidationError) -> JSONResponse:
         # Invalid search or path parameters are a client error: 400, not 422.
         return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            content={"detail": jsonable_encoder(error.errors(), custom_encoder={float: _finite_or_text})},
+            # Without "input" and "ctx": the error says where and why, never the value that was sent.
+            content={"detail": jsonable_encoder(
+                [{key: item[key] for key in ("type", "loc", "msg") if key in item} for item in error.errors()],
+                custom_encoder={float: _finite_or_text})},
         )
 
     @app.get("/api/v1/clubs/health/ready", tags=["health"])
@@ -150,6 +162,7 @@ def create_app(
     app.include_router(consultas_router)
     app.include_router(canales_router)
     app.include_router(administradores_router)
+    app.include_router(planes_admin_router)
     app.include_router(pagos_router)
     app.include_router(convocatorias_router)
     app.include_router(clubs_router)

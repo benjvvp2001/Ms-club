@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 from uuid import UUID
 
 from app.schemas.club import ClubFilters
@@ -170,16 +170,25 @@ class StoredPlan:
 
     id: int
     nombre: str
-    tipo: str  # USUARIO | CLUB
+    tipo: str  # USUARIO | CLUB: quien lo compra
     precio: int
     duracion_dias: int
     descripcion: str | None = None
     is_active: bool = True
+    # PLAN | CONVENIO (HU-56). Un convenio es un plan acordado con una institucion o un club.
+    categoria: str = "PLAN"
+    beneficios: tuple[str, ...] = ()
+    # Con quien se firmo el convenio (solo CONVENIO).
+    institucion: str | None = None
+    # Solo en el listado de administracion.
+    suscripciones_vigentes: int = 0
+    fecha_creacion: datetime | None = None
 
 
 @dataclass
 class StoredTransaccion:
-    """A row of transaccion_pago with its plan."""
+    """A row of transaccion_pago with its plan. `plan` carries what was paid (copied when the payment started):
+    the price is `amount`, and name, duration and benefits are the ones of that moment, not the plan's today."""
 
     id: UUID
     iniciada_por: UUID
@@ -203,7 +212,8 @@ class StoredTransaccion:
 
 @dataclass
 class StoredSuscripcion:
-    """A row of suscripcion with its plan. estado is computed when read."""
+    """A row of suscripcion with its plan. estado is computed when read. `plan` carries what the last payment
+    bought (price paid, name, duration, benefits), so a later change to the plan does not alter it."""
 
     id: UUID
     plan: StoredPlan
@@ -303,6 +313,19 @@ class CanalInactividad:
     ultima_actividad: datetime
     aviso_inactividad_en: datetime | None
     mantener_hasta: datetime | None
+
+
+class PlanNombreDuplicadoError(Exception):
+    """Another ACTIVE plan already has that name (HU-56)."""
+
+
+class PlanInactivoError(Exception):
+    """The plan is deactivated: it cannot be edited or deactivated again (HU-56)."""
+
+
+# HU-56: called inside the transaction that changes a plan, before it commits: (action, before, after).
+# If it raises, nothing is saved. Actions: PLAN_CREATED, PLAN_UPDATED, PLAN_DEACTIVATED.
+PlanAudit = Callable[[str, "StoredPlan | None", "StoredPlan"], None]
 
 
 class HiloEliminado(Exception):
@@ -818,6 +841,37 @@ class ClubRepository(Protocol):
         self, *, usuario_id: UUID | None = None, club_id: UUID | None = None
     ) -> StoredSuscripcion | None:
         """The subscription of an athlete or of a club, active or expired."""
+        ...
+
+    # -- gestion de planes y convenios (HU-56) ----------------------------------------
+
+    def get_plan_any(self, plan_id: int) -> StoredPlan | None:
+        """A plan, active or not."""
+        ...
+
+    def list_planes_admin(
+        self, *, estado: str, tipo: str | None, categoria: str | None, limit: int, offset: int
+    ) -> tuple[list[StoredPlan], int]:
+        """Plans for the administrator (estado: activo, inactivo or todos), newest first, with the number of
+        current subscriptions (fecha_fin in the future) of each, and the total before paging."""
+        ...
+
+    def create_plan(self, values: dict[str, Any], *, audit: PlanAudit) -> StoredPlan:
+        """Insert an active plan and call `audit` before committing; if it raises, nothing is saved.
+        Raises PlanNombreDuplicadoError."""
+        ...
+
+    def update_plan(
+        self, plan_id: int, changes: dict[str, Any], *, audit: PlanAudit
+    ) -> tuple[StoredPlan, StoredPlan] | None:
+        """Change an active plan (row locked) and call `audit` before committing. Returns (before, after) or
+        None if it does not exist. Raises PlanInactivoError, PlanNombreDuplicadoError. A change of price or
+        duration never touches subscriptions or payments already made (they hold their own copy)."""
+        ...
+
+    def deactivate_plan(self, plan_id: int, *, audit: PlanAudit) -> tuple[StoredPlan, StoredPlan] | None:
+        """Logical delete: is_active = false, never DELETE. Subscriptions already paid keep running until their
+        end. Returns (before, after) or None; raises PlanInactivoError if it was already deactivated."""
         ...
 
     def create_transaccion(self, values: dict[str, Any]) -> StoredTransaccion:
