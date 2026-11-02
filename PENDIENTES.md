@@ -564,7 +564,7 @@ Decisiones por confirmar (cada una es fácil de cambiar):
 | El precio es un entero en pesos (sin decimales), de 0 a 10.000.000. 0 = gratuito y no se paga con Webpay (409). | CLP no tiene decimales y Webpay cobra montos enteros; `transaccion_pago.amount` exige > 0 | `schemas/plan_admin.py` (`PRECIO_MAX`), `pago_service.initiate` |
 | Duración de 1 a 366 días (el tope que ya tenía la tabla). | Coherente con la tabla | `schemas/plan_admin.py`, `012` |
 | Errores de validación = 400 (no 422), como el resto de este servicio, y sin repetir el valor enviado. | Convención de ms-club | `main.py` (`invalid_request`) |
-| Un plan desactivado no se reactiva ni se edita; para volver a ofrecerlo se crea otro (el nombre queda libre). Sin ruta de reactivar. | Más simple y seguro; la reactivación era opcional | `plan_admin_service.py` |
+| Un plan desactivado no se edita. **Sí se puede reactivar** (`POST /api/v1/payments/admin/plans/{id}/reactivate`, desde 2026-11-02): solo si está desactivado y su nombre sigue libre entre los activos (si no, 409). Queda en la auditoría como `PLAN_REACTIVATED`. | El panel web ya mostraba "Reactivar" | `plan_admin_service.py`, `postgres_club_repository.reactivate_plan` |
 | No hay renovación automática en ningún servicio: una suscripción solo se extiende con un pago nuevo, y un plan desactivado no se puede contratar (404), así que no se renueva. | El campo `renovacion_automatica` de los diagramas no existe | `pago_service.initiate` |
 | Un pago ya iniciado antes de desactivar el plan se acepta al confirmarse (el dinero ya se cobró). | No cobrar sin entregar el servicio | `pago_service._confirm` |
 | El nombre es único entre planes activos, sin distinguir mayúsculas ni espacios; se reemplazó `UNIQUE (tipo, nombre)`. | Pedido de la HU | `012` (`plan_suscripcion_nombre_activo_uq`) |
@@ -578,12 +578,12 @@ Pendientes:
 - [ ] Aplicar `db/migrations/012_gestion_planes.sql` como `postgres` en cada ambiente (la aplica `clubs_migrate` en Docker).
       El rol `sportmatch_clubs` queda con INSERT y UPDATE sobre `plan_suscripcion`, nunca DELETE.
 - [ ] El seed `db/seeds/demo_planes.sql` ya no usa `ON CONFLICT (tipo, nombre)` (esa restricción desaparece con la 012).
-- [ ] Web (`sportmatch-web`): solo existe el cliente `lib/planesAdmin.ts`; falta la pantalla de planes del panel. En la web no
-      está instalado `node_modules`, así que el cliente se comprobó con el `tsc` de la app.
-- [x] El catálogo de la app (`Frontend-SportMatch-APP/services/planes.ts`) ya sale de `/payments/plans`: lista real, con categoría,
-      beneficios, institución y duración; un plan desactivado no aparece y un convenio nuevo sí; si la API falla muestra un error
-      (no vuelve a planes fijos). Solo "Gratuito" sigue siendo local, y únicamente si el backend no tiene un plan gratuito propio.
-      Pendiente de comprobar en un teléfono o emulador: el aspecto de las tarjetas y el pago real con Webpay.
+- [x] Web (`sportmatch-web`): la pantalla de planes y convenios del panel está conectada a esta API (`lib/api/ofertas.ts`,
+      `lib/api/planesAdmin.ts`), con el diseño original. Recorrido real en Chrome: `scripts/e2e-admin.cjs`.
+- [x] App (`Frontend-SportMatch-APP`): conserva su diseño original (planes Gratuito, Pro y Club y su tabla comparativa) y toma por
+      debajo el precio, la duración, la descripción y los beneficios de `/payments/plans`. Los convenios y otros planes extra del
+      backend **no se muestran** en la app: el diseño no tiene dónde (decisión del equipo de diseño). Un plan desactivado no llega de
+      la API. Pendiente de comprobar en un teléfono o emulador: el aspecto y el pago real con Webpay.
 - [ ] Una cuenta con rol `admin` es la única autorizada; no hay roles intermedios (por ejemplo, un "gestor de planes").
 - [ ] `docs/webpay/README.md` dice que el panel web `/planes` usa `lib/planes.mock.ts`; ese archivo ya no existe.
 
@@ -592,6 +592,53 @@ Pendientes:
 - [x] `db/migrations/013_plan_institucion.sql`: columna opcional `plan_suscripcion.institucion` (hasta 80 caracteres, solo para
       `categoria = CONVENIO`, con CHECK). La API la acepta en crear y editar (`null` la borra), la muestra el catálogo público y la
       auditoría registra su cambio solo por nombre de campo (`campos`), nunca el texto libre. Aplicar como `postgres` en cada ambiente.
-- [ ] En el panel web, un convenio ya contratado conserva su institución; no hay pantalla para ver quién tiene cada suscripción
-      (la API de administración solo informa el número de suscripciones vigentes por plan).
-- [ ] Sin reactivar planes: la web no ofrece "Reactivar" porque el backend no lo tiene (se crea otro plan).
+- [x] Institución: la web la muestra y la edita en convenios. La app de deportistas y clubes **no tiene** el campo (su diseño no lo trae).
+
+### Lo que faltaba para el diseño del panel web (2026-11-02)
+
+- [x] `POST /api/v1/payments/admin/plans/{id}/reactivate`: solo si está desactivado; el nombre debe seguir libre entre los planes
+      activos (409 con el motivo); auditoría `PLAN_REACTIVATED` en la misma operación (503 y no se guarda si falla). Requiere que
+      Ms_Users tenga la acción nueva en `AuditAction` (ya agregada): reconstruir `ms_users` junto con `ms_club`.
+- [x] `GET /api/v1/payments/admin/plans/{id}/subscriptions?estado=vigente|vencida|todas&pagina&limit` (máximo 100): nombre corto
+      de la persona o nombre del club, estado, nombre del plan y precio al contratar, inicio y término. Nunca correo ni RUT. Los
+      nombres de deportistas los pide ms-club a Ms_Users por la red interna (`POST /internal/v1/accounts/names`, con
+      `INTERNAL_SERVICE_TOKEN`); si Ms_Users no responde, la lista sale igual con el nombre vacío (la web dice "Cuenta eliminada").
+- [x] `db/migrations/014_plan_base_desactivacion.sql` (idempotente; aplicar como `postgres`): `es_base`, `fecha_desactivacion`,
+      `motivo_desactivacion` y `duracion_dias` NULL (= sin vencimiento, solo si `precio = 0`; un pago exige precio > 0, así que
+      transacciones y suscripciones siempre tienen duración).
+- [ ] **Decidir qué plan es el plan base.** La columna existe y el backend impide desactivar el plan base, pero ningún plan está
+      marcado (la migración no adivina). Para marcarlo: `UPDATE plan_suscripcion SET es_base = true WHERE id = <id>` (uno por
+      tipo). Hoy "Gratuito" de la app es un plan local sin fila en esta base. **Se deja pendiente a propósito (2026-11-02):** hoy el
+      backend solo impide desactivar el plan base; faltan por definir cuál es, cómo se marca desde el panel (hoy solo por SQL) y
+      qué otros límites tiene (editarlo, cambiarle precio o duración, crearlo).
+- [ ] La web carga las suscripciones plan por plan (hasta 5 páginas de 100 por plan). Con muchos planes o muchas suscripciones
+      conviene una ruta que las entregue todas juntas y paginadas.
+- [ ] La acción `PLAN_REACTIVATED` no está en la lista de etiquetas de la app (`services/auditoria.ts`) si el equipo vuelve a
+      mostrar la auditoría allí.
+
+## 18. Reportes y moderación: actor, nota y autor del contenido (HU-47, panel web)
+
+Código en `Ms_Users` (con endpoints internos en `Ms_activities` y `ms-machine`); se anota aquí porque es donde viven los pendientes.
+
+- [x] El reporte guarda quién lo resolvió (`revisado_por`), cuándo (`fecha_revision`) y la nota (`motivo_revision`, solo si el
+      administrador la escribió) y los devuelve en el listado y el detalle. La fila de auditoría usa el mismo actor, el mismo
+      instante (misma transacción) y la misma nota; sin nota sigue usando el motivo del propio reporte.
+- [x] Reportes de actividad y de mensaje: `reportado` trae la cuenta que hizo ese contenido y `autor_no_disponible` avisa cuando no
+      se pudo averiguar (servicio de origen caído o contenido que ya no existe). Se pregunta por la red interna con
+      `X-Internal-Service-Token`: `GET /internal/v1/activities/{id}/author` (Ms_Activities) y
+      `GET /internal/v1/messages/{chat}/{mensaje}/author` (Ms_Matching). Ninguna está en el gateway (hay prueba).
+- [x] Sancionar con un reporte de actividad o mensaje usa el mismo servicio de sanciones (HU-45): el reporte debe estar escalado y
+      ser de esa cuenta (el autor guardado). Un autor desconocido no se adivina (422).
+- [x] `db/migrations/014_reporte_revision_autor.sql` de Ms_Users (idempotente, registrada en `migrate.py`): `motivo_revision`,
+      `autor_id`, `autor_consultado_en`.
+- [ ] **Desplegar**: Ms_Users necesita `ACTIVITIES_SERVICE_URL`, `MATCHING_SERVICE_URL` e `INTERNAL_SERVICE_TOKEN`, y Ms_Activities y
+      Ms_Matching necesitan el mismo `INTERNAL_SERVICE_TOKEN` (ya está en `Ms_gateway/compose.yaml`). Sin ellos los reportes
+      funcionan pero salen sin autor. Reconstruir los tres servicios juntos.
+- [ ] Los reportes que ya existían (por ejemplo los de QA) se completan solos al listarlos, hasta 20 por petición y una sola vez
+      por hora cuando el contenido ya no existe. Un listado puede tardar un poco más la primera vez. Si hay muchos, conviene un
+      script que los complete de una vez.
+- [ ] Los mensajes de los chats de grupo de una actividad no se pueden reportar hoy (la app solo reporta mensajes de un match);
+      el autor de esos mensajes no se pregunta.
+- [ ] Las notas ya guardadas antes de esta migración no existen (quedan vacías); los reportes resueltos antes sí muestran quién
+      los resolvió porque `revisado_por` ya se guardaba.
+

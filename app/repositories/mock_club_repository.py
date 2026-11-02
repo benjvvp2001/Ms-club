@@ -10,6 +10,9 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from app.repositories.base import (
+    PlanActivoError,
+    PlanSuscripcion,
+    PlanBaseError,
     PlanInactivoError,
     PlanNombreDuplicadoError,
     AccesoDeportista,
@@ -1181,16 +1184,47 @@ class MockClubRepository:
         self._planes[plan_id] = after
         return replace(before), replace(after)
 
-    def deactivate_plan(self, plan_id: int, *, audit):
+    def deactivate_plan(self, plan_id: int, *, audit, motivo: str | None = None):
         before = self._planes.get(plan_id)
         if before is None:
             return None
         if not before.is_active:
             raise PlanInactivoError
-        after = replace(before, is_active=False)
+        if before.es_base:
+            raise PlanBaseError
+        after = replace(before, is_active=False, fecha_desactivacion=datetime.now(timezone.utc),
+                        motivo_desactivacion=motivo)
         audit("PLAN_DEACTIVATED", replace(before), after)
         self._planes[plan_id] = after
         return replace(before), replace(after)
+
+    def reactivate_plan(self, plan_id: int, *, audit):
+        before = self._planes.get(plan_id)
+        if before is None:
+            return None
+        if before.is_active:
+            raise PlanActivoError
+        if self._name_taken(before.nombre, except_id=plan_id):
+            raise PlanNombreDuplicadoError
+        after = replace(before, is_active=True, fecha_desactivacion=None, motivo_desactivacion=None)
+        audit("PLAN_REACTIVATED", replace(before), after)
+        self._planes[plan_id] = after
+        return replace(before), replace(after)
+
+    def list_suscripciones_plan(self, plan_id: int, *, estado: str, limit: int, offset: int):
+        now = datetime.now(timezone.utc)
+        rows = [r for r in self._suscripciones.values() if r["plan"].id == plan_id
+                and (estado == "todas" or (estado == "vigente") == (r["fecha_fin"] > now))]
+        rows.sort(key=lambda r: (r["fecha_fin"] > now, r["fecha_fin"], str(r["id"])), reverse=True)
+        items = []
+        for r in rows[offset : offset + limit]:
+            club = self._clubs.get(r["club_id"]) if r["club_id"] else None
+            items.append(PlanSuscripcion(
+                id=r["id"], estado="ACTIVE" if r["fecha_fin"] > now else "EXPIRED", fecha_inicio=r["fecha_inicio"],
+                fecha_fin=r["fecha_fin"], precio_pagado=r["plan"].precio, plan_nombre=r["plan"].nombre,
+                usuario_id=r["usuario_id"],
+                club_id=r["club_id"], club_nombre=club.nombre if club else None))
+        return items, len(rows)
 
     def get_suscripcion(
         self, *, usuario_id: UUID | None = None, club_id: UUID | None = None

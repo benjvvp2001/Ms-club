@@ -10,11 +10,15 @@ from app.schemas.pago import PlanCategoria, PlanTipo
 from app.schemas.plan_admin import (
     LIMIT_DEFAULT,
     LIMIT_MAX,
+    SUSCRIPCIONES_LIMIT_MAX,
     EstadoPlanFiltro,
+    EstadoSuscripcionFiltro,
     PlanAdminPage,
     PlanAdminRead,
     PlanCreate,
     PlanDesactivar,
+    PlanReactivar,
+    PlanSuscripcionPage,
     PlanUpdate,
 )
 from app.services.plan_admin_service import PlanAdminService
@@ -91,3 +95,38 @@ def deactivate_plan(
     payload: PlanDesactivar | None = None,
 ) -> PlanAdminRead:
     return service.deactivate(admin, plan_id, payload or PlanDesactivar())
+
+
+@router.post(
+    "/{plan_id}/reactivate",
+    response_model=PlanAdminRead,
+    summary="Reactivar un plan o convenio desactivado",
+    description="Solo si está desactivado. Vuelve al catálogo y borra la fecha y el motivo de la desactivación. "
+    "Su nombre debe seguir libre entre los planes activos: si otro plan activo lo tomó, responde 409. "
+    "Queda en la auditoría (PLAN_REACTIVATED) en la misma operación; si la auditoría falla, no se guarda (503).",
+)
+def reactivate_plan(
+    plan_id: int,
+    admin: Annotated[Actor, Depends(get_admin)],
+    service: Annotated[PlanAdminService, Depends(get_plan_admin_service)],
+    payload: PlanReactivar | None = None,
+) -> PlanAdminRead:
+    return service.reactivate(admin, plan_id, payload or PlanReactivar())
+
+
+@router.get(
+    "/{plan_id}/subscriptions",
+    response_model=PlanSuscripcionPage,
+    summary="Suscripciones de un plan o convenio (administrador)",
+    description="Quienes tienen este plan como su último pago: nombre corto (o el del club), estado, fecha de inicio "
+    f"y de término. Filtro estado (vigente, vencida, todas); pagina (desde 1) y limit (máximo {SUSCRIPCIONES_LIMIT_MAX}).",
+)
+def list_plan_subscriptions(
+    plan_id: int,
+    _: Annotated[Actor, Depends(get_admin)],
+    service: Annotated[PlanAdminService, Depends(get_plan_admin_service)],
+    estado: Annotated[EstadoSuscripcionFiltro, Query()] = "todas",
+    pagina: Annotated[int, Query(ge=1, le=10_000)] = 1,
+    limit: Annotated[int, Query(ge=1, le=SUSCRIPCIONES_LIMIT_MAX)] = 20,
+) -> PlanSuscripcionPage:
+    return service.list_subscriptions(plan_id, estado, pagina, limit)

@@ -66,7 +66,7 @@ class PlanRead(APIModel):
     categoria: PlanCategoria = "PLAN"
     descripcion: str | None
     precio: int
-    duracion_dias: int
+    duracion_dias: int | None
     beneficios: list[str] = Field(default_factory=list)
     institucion: str | None = None
 

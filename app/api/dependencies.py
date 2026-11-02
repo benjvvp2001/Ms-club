@@ -137,7 +137,8 @@ def get_plan_admin_service(
     request: Request, repository: ClubRepository = Depends(get_repository)
 ) -> PlanAdminService:
     # No auditor configured = changes are refused with 503 (never saved without their audit entry).
-    return PlanAdminService(repository, getattr(request.app.state, "plan_auditor", None))
+    return PlanAdminService(
+        repository, getattr(request.app.state, "plan_auditor", None), getattr(request.app.state, "account_names", None))
 
 
 def get_club_admin(actor: Actor = Depends(get_current_actor)) -> Actor:

@@ -33,6 +33,7 @@ from app.repositories.base import ClubRepository
 from app.repositories.postgres_club_repository import PostgresClubRepository
 from app.services import canal_inactividad
 from app.services.plan_audit import InternalAuditClient, PlanAuditor
+from app.services.account_names import AccountDirectory, InternalAccountsClient
 from app.services.users_client import AthleteProfiles, UsersClient
 from app.services.webpay import WebpayGateway, build_webpay
 
@@ -50,6 +51,7 @@ def create_app(
     webpay_settings: WebpaySettings | None = None,
     inactividad: bool | None = None,
     plan_auditor: PlanAuditor | None = None,
+    account_names: AccountDirectory | None = None,
 ) -> FastAPI:
     """Create the service without routes outside the approved clubs prefix.
 
@@ -91,6 +93,9 @@ def create_app(
             if plan_auditor is None:
                 # HU-56: plan changes are audited in Ms_Users with the shared secret (INTERNAL_SERVICE_TOKEN).
                 app.state.plan_auditor = InternalAuditClient(http_client, os.getenv("INTERNAL_SERVICE_TOKEN"))
+            if account_names is None:
+                # HU-56: the subscribers' names come from Ms_Users with the same shared secret.
+                app.state.account_names = InternalAccountsClient(http_client, os.getenv("INTERNAL_SERVICE_TOKEN"))
         if owns_webpay:
             app.state.webpay_settings = get_webpay_settings()
             app.state.webpay = build_webpay(app.state.webpay_settings)
@@ -131,6 +136,8 @@ def create_app(
         app.state.webpay_settings = webpay_settings
     if plan_auditor is not None:
         app.state.plan_auditor = plan_auditor
+    if account_names is not None:
+        app.state.account_names = account_names
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, error: RequestValidationError) -> JSONResponse:
