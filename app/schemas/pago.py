@@ -9,6 +9,8 @@ from pydantic import Field, model_validator
 from app.schemas.common import APIModel
 
 PlanTipo = Literal["USUARIO", "CLUB"]
+# HU-56: un convenio es un plan acordado con una institucion o un club; se compra igual que un plan.
+PlanCategoria = Literal["PLAN", "CONVENIO"]
 EstadoTransaccion = Literal["PENDING", "APPROVED", "REJECTED", "CANCELLED"]
 EstadoSuscripcion = Literal["ACTIVE", "EXPIRED"]
 
@@ -61,9 +63,12 @@ class PlanRead(APIModel):
     id: int
     nombre: str
     tipo: PlanTipo
+    categoria: PlanCategoria = "PLAN"
     descripcion: str | None
     precio: int
     duracion_dias: int
+    beneficios: list[str] = Field(default_factory=list)
+    institucion: str | None = None
 
 
 class PagoIniciado(APIModel):

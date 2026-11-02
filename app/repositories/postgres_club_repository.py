@@ -27,6 +27,8 @@ from app.repositories.base import (
     HiloEliminado,
     OutboxEvent,
     OutboxMessage,
+    PlanInactivoError,
+    PlanNombreDuplicadoError,
     ReviewResult,
     StoredAdmin,
     StoredAsignacion,
@@ -138,17 +140,23 @@ _COMUNICADO_SELECT = """
     JOIN club cl ON cl.id = c.club_id
 """
 
-_PLAN_ALIASES = """
-    p.id AS plan_id, p.nombre AS plan_nombre, p.tipo AS plan_tipo,
-    p.descripcion AS plan_descripcion, p.precio AS plan_precio,
-    p.duracion_dias AS plan_duracion_dias, p.is_active AS plan_is_active
+def _plan_aliases(nombre: str, precio: str, duracion: str, beneficios: str) -> str:
+    """The plan columns of a payment or a subscription: name, price, duration and benefits are the ones COPIED
+    when it was paid (HU-56); the rest (id, tipo, categoria, descripcion, is_active) come from the plan."""
+    return f"""
+    p.id AS plan_id, {nombre} AS plan_nombre, p.tipo AS plan_tipo,
+    p.descripcion AS plan_descripcion, {precio} AS plan_precio,
+    {duracion} AS plan_duracion_dias, p.is_active AS plan_is_active,
+    p.categoria AS plan_categoria, {beneficios} AS plan_beneficios
 """
+
 
 _TRANSACCION_SELECT = f"""
     SELECT t.id, t.usuario_id, t.club_id, t.iniciada_por, t.buy_order, t.session_id,
            t.token_ws, t.amount, t.status, t.response_code, t.authorization_code,
            t.payment_type_code, t.card_last4, t.installments_number, t.transaction_date,
-           t.fecha_creacion, t.fecha_actualizacion, {_PLAN_ALIASES}
+           t.fecha_creacion, t.fecha_actualizacion,
+           {_plan_aliases("t.plan_nombre", "t.amount", "t.duracion_dias", "t.beneficios")}
     FROM transaccion_pago t
     JOIN plan_suscripcion p ON p.id = t.plan_id
 """
@@ -156,7 +164,7 @@ _TRANSACCION_SELECT = f"""
 _SUSCRIPCION_SELECT = f"""
     SELECT s.id, s.usuario_id, s.club_id, s.fecha_inicio, s.fecha_fin,
            CASE WHEN s.fecha_fin > now() THEN 'ACTIVE' ELSE 'EXPIRED' END AS estado,
-           {_PLAN_ALIASES}
+           {_plan_aliases("s.plan_nombre", "s.precio_pagado", "s.duracion_dias", "s.beneficios")}
     FROM suscripcion s
     JOIN plan_suscripcion p ON p.id = s.plan_id
 """
@@ -166,15 +174,21 @@ _SUSCRIPCION_SELECT = f"""
 # indexes (usuario_id / club_id) make ON CONFLICT pick the buyer's row.
 _SUSCRIPCION_UPSERT = """
     INSERT INTO suscripcion
-        (usuario_id, club_id, plan_id, fecha_inicio, fecha_fin, ultima_transaccion_id)
+        (usuario_id, club_id, plan_id, fecha_inicio, fecha_fin, ultima_transaccion_id,
+         plan_nombre, precio_pagado, duracion_dias, beneficios)
     VALUES (%(usuario_id)s, %(club_id)s, %(plan_id)s, now(),
-            now() + make_interval(days => %(dias)s), %(transaccion_id)s)
+            now() + make_interval(days => %(dias)s), %(transaccion_id)s,
+            %(plan_nombre)s, %(precio_pagado)s, %(dias)s, %(beneficios)s)
     ON CONFLICT ({column}) WHERE {column} IS NOT NULL DO UPDATE SET
         plan_id = EXCLUDED.plan_id,
         fecha_inicio = CASE WHEN suscripcion.fecha_fin > now()
                             THEN suscripcion.fecha_inicio ELSE now() END,
         fecha_fin = GREATEST(suscripcion.fecha_fin, now()) + make_interval(days => %(dias)s),
         ultima_transaccion_id = EXCLUDED.ultima_transaccion_id,
+        plan_nombre = EXCLUDED.plan_nombre,
+        precio_pagado = EXCLUDED.precio_pagado,
+        duracion_dias = EXCLUDED.duracion_dias,
+        beneficios = EXCLUDED.beneficios,
         fecha_actualizacion = now()
 """
 
@@ -1758,26 +1772,128 @@ class PostgresClubRepository:
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                SELECT id, nombre, tipo, descripcion, precio, duracion_dias, is_active
+                SELECT id, nombre, tipo, descripcion, precio, duracion_dias, is_active, categoria, beneficios, institucion
                 FROM plan_suscripcion
                 WHERE is_active AND (%s::text IS NULL OR tipo = %s)
                 ORDER BY precio, id
                 """,
                 (tipo, tipo),
             )
-            return [StoredPlan(**row) for row in cur.fetchall()]
+            return [_plan(row) for row in cur.fetchall()]
 
     def get_plan(self, plan_id: int) -> StoredPlan | None:
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
-                SELECT id, nombre, tipo, descripcion, precio, duracion_dias, is_active
+                SELECT id, nombre, tipo, descripcion, precio, duracion_dias, is_active, categoria, beneficios, institucion
                 FROM plan_suscripcion WHERE id = %s AND is_active
                 """,
                 (plan_id,),
             )
             row = cur.fetchone()
-        return StoredPlan(**row) if row is not None else None
+        return _plan(row) if row is not None else None
+
+    # -- gestion de planes y convenios (HU-56) ----------------------------------------
+
+    _PLAN_COLUMNS = ("id, nombre, tipo, descripcion, precio, duracion_dias, is_active, categoria, beneficios, "
+                     "institucion, fecha_creacion")
+
+    def get_plan_any(self, plan_id: int) -> StoredPlan | None:
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT {self._PLAN_COLUMNS} FROM plan_suscripcion WHERE id = %s", (plan_id,))
+            row = cur.fetchone()
+        return _plan(row) if row is not None else None
+
+    def list_planes_admin(
+        self, *, estado: str, tipo: str | None, categoria: str | None, limit: int, offset: int
+    ) -> tuple[list[StoredPlan], int]:
+        where = """(%(estado)s = 'todos' OR is_active = (%(estado)s = 'activo'))
+                   AND (%(tipo)s::text IS NULL OR tipo = %(tipo)s)
+                   AND (%(categoria)s::text IS NULL OR categoria = %(categoria)s)"""
+        params = {"estado": estado, "tipo": tipo, "categoria": categoria, "limit": limit, "offset": offset}
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT count(*) AS total FROM plan_suscripcion WHERE {where}", params)
+            total = cur.fetchone()["total"]
+            cur.execute(
+                f"""
+                SELECT {self._PLAN_COLUMNS},
+                       (SELECT count(*) FROM suscripcion s
+                        WHERE s.plan_id = plan_suscripcion.id AND s.fecha_fin > now()) AS suscripciones_vigentes
+                FROM plan_suscripcion WHERE {where}
+                ORDER BY fecha_creacion DESC, id DESC LIMIT %(limit)s OFFSET %(offset)s
+                """,
+                params,
+            )
+            return [_plan(row) for row in cur.fetchall()], total
+
+    def create_plan(self, values: dict[str, Any], *, audit) -> StoredPlan:
+        try:
+            # One transaction: the INSERT and the audit call. If the audit fails, the plan is not saved.
+            with self._pool.connection() as conn, conn.transaction():
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO plan_suscripcion
+                            (nombre, tipo, descripcion, precio, duracion_dias, categoria, beneficios, institucion)
+                        VALUES (%(nombre)s, %(tipo)s, %(descripcion)s, %(precio)s, %(duracion_dias)s,
+                                %(categoria)s, %(beneficios)s, %(institucion)s)
+                        RETURNING {self._PLAN_COLUMNS}
+                        """,
+                        {"descripcion": None, "categoria": "PLAN", "institucion": None, **values,
+                         "beneficios": Jsonb(list(values.get("beneficios", ())))},
+                    )
+                    plan = _plan(cur.fetchone())
+                audit("PLAN_CREATED", None, plan)
+                return plan
+        except errors.UniqueViolation as error:
+            raise PlanNombreDuplicadoError from error
+
+    _EDITABLE = frozenset({"nombre", "descripcion", "precio", "duracion_dias", "beneficios", "institucion"})
+
+    def update_plan(self, plan_id: int, changes: dict[str, Any], *, audit):
+        if not set(changes) <= self._EDITABLE:
+            raise ValueError("Unknown plan column")
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(f"SELECT {self._PLAN_COLUMNS} FROM plan_suscripcion WHERE id = %s FOR UPDATE",
+                                (plan_id,))
+                    row = cur.fetchone()
+                    if row is None:
+                        return None
+                    before = _plan(row)
+                    if not before.is_active:
+                        raise PlanInactivoError
+                    values = {k: (Jsonb(list(v)) if k == "beneficios" else v) for k, v in changes.items()}
+                    assignments = ", ".join(f"{column} = %({column})s" for column in values)
+                    cur.execute(
+                        f"UPDATE plan_suscripcion SET {assignments} WHERE id = %(id)s RETURNING {self._PLAN_COLUMNS}",
+                        {**values, "id": plan_id},
+                    )
+                    after = _plan(cur.fetchone())
+                audit("PLAN_UPDATED", before, after)
+                return before, after
+        except errors.UniqueViolation as error:
+            raise PlanNombreDuplicadoError from error
+
+    def deactivate_plan(self, plan_id: int, *, audit):
+        with self._pool.connection() as conn, conn.transaction():
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(f"SELECT {self._PLAN_COLUMNS} FROM plan_suscripcion WHERE id = %s FOR UPDATE",
+                            (plan_id,))
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                before = _plan(row)
+                if not before.is_active:
+                    raise PlanInactivoError
+                cur.execute(
+                    f"UPDATE plan_suscripcion SET is_active = false WHERE id = %s RETURNING {self._PLAN_COLUMNS}",
+                    (plan_id,),
+                )
+                after = _plan(cur.fetchone())
+            audit("PLAN_DEACTIVATED", before, after)
+            return before, after
 
     def get_suscripcion(
         self, *, usuario_id: UUID | None = None, club_id: UUID | None = None
@@ -1796,12 +1912,14 @@ class PostgresClubRepository:
                 """
                 INSERT INTO transaccion_pago
                     (usuario_id, club_id, iniciada_por, plan_id, buy_order, session_id,
-                     token_ws, amount)
+                     token_ws, amount, plan_nombre, duracion_dias, beneficios)
                 VALUES (%(usuario_id)s, %(club_id)s, %(iniciada_por)s, %(plan_id)s,
-                        %(buy_order)s, %(session_id)s, %(token_ws)s, %(amount)s)
+                        %(buy_order)s, %(session_id)s, %(token_ws)s, %(amount)s,
+                        %(plan_nombre)s, %(duracion_dias)s, %(beneficios)s)
                 RETURNING id
                 """,
-                {"usuario_id": None, "club_id": None, **values},
+                {"usuario_id": None, "club_id": None, **values,
+                 "beneficios": Jsonb(list(values["beneficios"]))},
             ).fetchone()[0]
         transaccion = self._get_transaccion("t.id = %s", transaccion_id)
         assert transaccion is not None
@@ -1841,7 +1959,7 @@ class PostgresClubRepository:
                     transaction_date = %(transaction_date)s,
                     fecha_actualizacion = now()
                 WHERE id = %(id)s AND status = 'PENDING'
-                RETURNING usuario_id, club_id, plan_id
+                RETURNING usuario_id, club_id, plan_id, amount, plan_nombre, duracion_dias, beneficios
                 """,
                 {
                     "response_code": None, "authorization_code": None,
@@ -1852,16 +1970,16 @@ class PostgresClubRepository:
             ).fetchone()
             changed = row is not None
             if changed and status == "APPROVED":
-                usuario_id, club_id, plan_id = row
-                dias = conn.execute(
-                    "SELECT duracion_dias FROM plan_suscripcion WHERE id = %s", (plan_id,)
-                ).fetchone()[0]
+                usuario_id, club_id, plan_id, amount, plan_nombre, dias, beneficios = row
+                # What the buyer paid, copied when the payment started: a later change to the plan (price,
+                # duration, benefits) does not change the days or the terms of this subscription.
                 column = "usuario_id" if usuario_id is not None else "club_id"
                 conn.execute(
                     _SUSCRIPCION_UPSERT.format(column=column),
                     {
                         "usuario_id": usuario_id, "club_id": club_id, "plan_id": plan_id,
-                        "dias": dias, "transaccion_id": transaccion_id,
+                        "dias": dias, "transaccion_id": transaccion_id, "plan_nombre": plan_nombre,
+                        "precio_pagado": amount, "beneficios": Jsonb(beneficios),
                     },
                 )
         transaccion = self._get_transaccion("t.id = %s", transaccion_id)
@@ -2182,6 +2300,11 @@ def _to_convocatoria(row: dict[str, Any]) -> StoredConvocatoria:
     return StoredConvocatoria(**row, deporte=deporte)
 
 
+def _plan(row: dict[str, Any]) -> StoredPlan:
+    """A plan_suscripcion row (the jsonb beneficios arrives as a list)."""
+    return StoredPlan(**{**row, "beneficios": tuple(row.get("beneficios") or ())})
+
+
 def _split_plan(row: dict[str, Any]) -> StoredPlan:
     return StoredPlan(
         id=row.pop("plan_id"),
@@ -2191,6 +2314,8 @@ def _split_plan(row: dict[str, Any]) -> StoredPlan:
         precio=row.pop("plan_precio"),
         duracion_dias=row.pop("plan_duracion_dias"),
         is_active=row.pop("plan_is_active"),
+        categoria=row.pop("plan_categoria"),
+        beneficios=tuple(row.pop("plan_beneficios") or ()),
     )
 
 

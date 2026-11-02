@@ -62,6 +62,11 @@ class PagoService:
         plan = self._repository.get_plan(payload.plan_id)
         if plan is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan no encontrado.")
+        if plan.precio <= 0:
+            # A free plan or convenio is listed but Webpay cannot charge $0 (and a payment must be > 0).
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Este plan es gratuito y no requiere pago."
+            )
         usuario_id, club_id = self._comprador(actor, plan)
 
         actual = self._repository.get_suscripcion(usuario_id=usuario_id, club_id=club_id)
@@ -96,6 +101,11 @@ class PagoService:
                 "session_id": session_id,
                 "token_ws": creada.token,
                 "amount": plan.precio,
+                # A copy of what is being bought: later changes to the plan do not alter this payment
+                # nor the subscription it creates (HU-56).
+                "plan_nombre": plan.nombre,
+                "duracion_dias": plan.duracion_dias,
+                "beneficios": plan.beneficios,
             }
         )
         return PagoIniciado(
@@ -284,9 +294,12 @@ def to_plan_read(plan: StoredPlan) -> PlanRead:
         id=plan.id,
         nombre=plan.nombre,
         tipo=plan.tipo,
+        categoria=plan.categoria,
         descripcion=plan.descripcion,
         precio=plan.precio,
         duracion_dias=plan.duracion_dias,
+        beneficios=list(plan.beneficios),
+        institucion=plan.institucion,
     )
 
 
