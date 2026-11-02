@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
@@ -81,7 +82,8 @@ class PlanCreate(_PlanTextos):
     categoria: PlanCategoria = "PLAN"
     descripcion: Annotated[str | None, Field(max_length=DESCRIPCION_MAX)] = None
     precio: Precio
-    duracion_dias: Duracion
+    # null = sin vencimiento, solo si es gratis.
+    duracion_dias: Duracion | None
     beneficios: Annotated[list[Beneficio], Field(max_length=BENEFICIOS_MAX)] = Field(default_factory=list)
     # Solo un convenio tiene institucion (con quien se firmo).
     institucion: Institucion | None = None
@@ -98,6 +100,12 @@ class PlanCreate(_PlanTextos):
             raise ValueError("Solo un convenio tiene institución.")
         return self
 
+    @model_validator(mode="after")
+    def sin_vencimiento_solo_gratis(self) -> "PlanCreate":
+        if self.duracion_dias is None and self.precio > 0:
+            raise ValueError("Un plan de pago necesita una duración (de 1 a 366 días).")
+        return self
+
 
 class PlanUpdate(_PlanTextos):
     """Solo cambia lo que se envia. El tipo (quien lo compra) y la categoria no se editan."""
@@ -105,6 +113,7 @@ class PlanUpdate(_PlanTextos):
     nombre: Nombre | None = None
     descripcion: Annotated[str | None, Field(max_length=DESCRIPCION_MAX)] = None
     precio: Precio | None = None
+    # null = sin vencimiento (solo si el precio resultante es 0: lo valida el servicio con el precio actual).
     duracion_dias: Duracion | None = None
     beneficios: Annotated[list[Beneficio], Field(max_length=BENEFICIOS_MAX)] | None = None
     # Solo en un convenio; null la borra.
@@ -122,8 +131,8 @@ class PlanUpdate(_PlanTextos):
         if not enviados:
             raise ValueError("Envía al menos un campo para cambiar.")
         # Estos campos no admiten null; descripcion si (la borra).
-        if any(getattr(self, campo) is None for campo in enviados & {"nombre", "precio", "duracion_dias", "beneficios"}):
-            raise ValueError("nombre, precio, duracion_dias y beneficios no pueden ser null.")
+        if any(getattr(self, campo) is None for campo in enviados & {"nombre", "precio", "beneficios"}):
+            raise ValueError("nombre, precio y beneficios no pueden ser null.")
         return self
 
 
@@ -136,8 +145,21 @@ class PlanDesactivar(_PlanTextos):
         return blank_is_none(value)
 
 
+class PlanReactivar(_PlanTextos):
+    motivo: Motivo | None = None
+
+    @field_validator("motivo", mode="before")
+    @classmethod
+    def vacio_es_nulo(cls, value: object) -> object:
+        return blank_is_none(value)
+
+
 class PlanAdminRead(PlanRead):
     is_active: bool
+    # El plan base no se puede desactivar. Cuando y por que se retiro del catalogo (null mientras esta activo).
+    es_base: bool = False
+    fecha_desactivacion: datetime | None = None
+    motivo_desactivacion: str | None = None
     # Suscripciones cuya vigencia (fecha_fin) aun no termina y cuyo ultimo pago fue de este plan.
     suscripciones_vigentes: int
     fecha_creacion: datetime | None
@@ -150,6 +172,30 @@ class PlanAdminPage(APIModel):
     total: int
 
 
+class PlanSuscripcionRead(APIModel):
+    """Una suscripcion de un plan. `suscriptor` es el nombre corto ("Ana T.") o el del club; null si la cuenta ya no
+    existe o su nombre no esta disponible. Nunca incluye correo ni RUT."""
+
+    id: UUID
+    suscriptor: str | None
+    tipo_suscriptor: Literal["USUARIO", "CLUB"]
+    estado: Literal["ACTIVE", "EXPIRED"]
+    # El nombre del plan y el precio que pago al contratar: un cambio posterior en el plan no los altera.
+    plan_nombre: str
+    precio_pagado: int
+    fecha_inicio: datetime
+    fecha_fin: datetime
+
+
+class PlanSuscripcionPage(APIModel):
+    items: list[PlanSuscripcionRead]
+    pagina: int
+    limit: int
+    total: int
+
+
 EstadoPlanFiltro = Literal["activo", "inactivo", "todos"]
+EstadoSuscripcionFiltro = Literal["vigente", "vencida", "todas"]
 LIMIT_DEFAULT = 20
 LIMIT_MAX = PAGE_SIZE_MAX
+SUSCRIPCIONES_LIMIT_MAX = 100

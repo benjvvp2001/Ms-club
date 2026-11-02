@@ -172,7 +172,7 @@ class StoredPlan:
     nombre: str
     tipo: str  # USUARIO | CLUB: quien lo compra
     precio: int
-    duracion_dias: int
+    duracion_dias: int | None  # None = sin vencimiento (solo si precio == 0)
     descripcion: str | None = None
     is_active: bool = True
     # PLAN | CONVENIO (HU-56). Un convenio es un plan acordado con una institucion o un club.
@@ -183,6 +183,26 @@ class StoredPlan:
     # Solo en el listado de administracion.
     suscripciones_vigentes: int = 0
     fecha_creacion: datetime | None = None
+    # El plan base (p. ej. Gratuito) no se puede desactivar. Cuando y por que se retiro del catalogo (None si activo).
+    es_base: bool = False
+    fecha_desactivacion: datetime | None = None
+    motivo_desactivacion: str | None = None
+
+
+@dataclass(frozen=True)
+class PlanSuscripcion:
+    """A subscription whose last payment was of a plan, for the administrator (HU-56). The buyer is an athlete's
+    account (usuario_id; the name lives in Ms_Users) or a club (club_nombre). estado: ACTIVE | EXPIRED."""
+
+    id: UUID
+    estado: str
+    fecha_inicio: datetime
+    fecha_fin: datetime
+    precio_pagado: int
+    plan_nombre: str  # the name of the plan when it was paid
+    usuario_id: UUID | None = None
+    club_id: UUID | None = None
+    club_nombre: str | None = None
 
 
 @dataclass
@@ -323,8 +343,16 @@ class PlanInactivoError(Exception):
     """The plan is deactivated: it cannot be edited or deactivated again (HU-56)."""
 
 
+class PlanActivoError(Exception):
+    """The plan is already active: it cannot be reactivated (HU-56)."""
+
+
+class PlanBaseError(Exception):
+    """The base plan cannot be deactivated (HU-56)."""
+
+
 # HU-56: called inside the transaction that changes a plan, before it commits: (action, before, after).
-# If it raises, nothing is saved. Actions: PLAN_CREATED, PLAN_UPDATED, PLAN_DEACTIVATED.
+# If it raises, nothing is saved. Actions: PLAN_CREATED, PLAN_UPDATED, PLAN_DEACTIVATED, PLAN_REACTIVATED.
 PlanAudit = Callable[[str, "StoredPlan | None", "StoredPlan"], None]
 
 
@@ -869,9 +897,25 @@ class ClubRepository(Protocol):
         duration never touches subscriptions or payments already made (they hold their own copy)."""
         ...
 
-    def deactivate_plan(self, plan_id: int, *, audit: PlanAudit) -> tuple[StoredPlan, StoredPlan] | None:
-        """Logical delete: is_active = false, never DELETE. Subscriptions already paid keep running until their
-        end. Returns (before, after) or None; raises PlanInactivoError if it was already deactivated."""
+    def deactivate_plan(
+        self, plan_id: int, *, audit: PlanAudit, motivo: str | None = None
+    ) -> tuple[StoredPlan, StoredPlan] | None:
+        """Logical delete: is_active = false, never DELETE; it stores the date and the reason. Subscriptions already
+        paid keep running until their end. Returns (before, after) or None; raises PlanInactivoError if it was
+        already deactivated and PlanBaseError if it is the base plan."""
+        ...
+
+    def reactivate_plan(self, plan_id: int, *, audit: PlanAudit) -> tuple[StoredPlan, StoredPlan] | None:
+        """Put a deactivated plan back in the catalog (row locked), clearing its deactivation date and reason, and
+        call `audit` before committing. Returns (before, after) or None. Raises PlanActivoError if it is already
+        active and PlanNombreDuplicadoError if another ACTIVE plan has taken its name."""
+        ...
+
+    def list_suscripciones_plan(
+        self, plan_id: int, *, estado: str, limit: int, offset: int
+    ) -> tuple[list[PlanSuscripcion], int]:
+        """Subscriptions whose last payment was of this plan (estado: vigente, vencida or todas), the current ones
+        first and then the latest to end, with the total before paging."""
         ...
 
     def create_transaccion(self, values: dict[str, Any]) -> StoredTransaccion:

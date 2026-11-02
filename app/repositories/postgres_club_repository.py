@@ -27,6 +27,9 @@ from app.repositories.base import (
     HiloEliminado,
     OutboxEvent,
     OutboxMessage,
+    PlanActivoError,
+    PlanSuscripcion,
+    PlanBaseError,
     PlanInactivoError,
     PlanNombreDuplicadoError,
     ReviewResult,
@@ -1796,7 +1799,7 @@ class PostgresClubRepository:
     # -- gestion de planes y convenios (HU-56) ----------------------------------------
 
     _PLAN_COLUMNS = ("id, nombre, tipo, descripcion, precio, duracion_dias, is_active, categoria, beneficios, "
-                     "institucion, fecha_creacion")
+                     "institucion, fecha_creacion, es_base, fecha_desactivacion, motivo_desactivacion")
 
     def get_plan_any(self, plan_id: int) -> StoredPlan | None:
         with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -1876,7 +1879,7 @@ class PostgresClubRepository:
         except errors.UniqueViolation as error:
             raise PlanNombreDuplicadoError from error
 
-    def deactivate_plan(self, plan_id: int, *, audit):
+    def deactivate_plan(self, plan_id: int, *, audit, motivo: str | None = None):
         with self._pool.connection() as conn, conn.transaction():
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(f"SELECT {self._PLAN_COLUMNS} FROM plan_suscripcion WHERE id = %s FOR UPDATE",
@@ -1887,13 +1890,65 @@ class PostgresClubRepository:
                 before = _plan(row)
                 if not before.is_active:
                     raise PlanInactivoError
+                if before.es_base:
+                    raise PlanBaseError
                 cur.execute(
-                    f"UPDATE plan_suscripcion SET is_active = false WHERE id = %s RETURNING {self._PLAN_COLUMNS}",
-                    (plan_id,),
+                    f"""UPDATE plan_suscripcion
+                        SET is_active = false, fecha_desactivacion = now(), motivo_desactivacion = %s
+                        WHERE id = %s RETURNING {self._PLAN_COLUMNS}""",
+                    (motivo, plan_id),
                 )
                 after = _plan(cur.fetchone())
             audit("PLAN_DEACTIVATED", before, after)
             return before, after
+
+    def reactivate_plan(self, plan_id: int, *, audit):
+        try:
+            with self._pool.connection() as conn, conn.transaction():
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(f"SELECT {self._PLAN_COLUMNS} FROM plan_suscripcion WHERE id = %s FOR UPDATE",
+                                (plan_id,))
+                    row = cur.fetchone()
+                    if row is None:
+                        return None
+                    before = _plan(row)
+                    if before.is_active:
+                        raise PlanActivoError
+                    # The unique index on the name among ACTIVE plans refuses it if the name was taken meanwhile.
+                    cur.execute(
+                        f"""UPDATE plan_suscripcion
+                            SET is_active = true, fecha_desactivacion = NULL, motivo_desactivacion = NULL
+                            WHERE id = %s RETURNING {self._PLAN_COLUMNS}""",
+                        (plan_id,),
+                    )
+                    after = _plan(cur.fetchone())
+                audit("PLAN_REACTIVATED", before, after)
+                return before, after
+        except errors.UniqueViolation as error:
+            raise PlanNombreDuplicadoError from error
+
+    def list_suscripciones_plan(self, plan_id: int, *, estado: str, limit: int, offset: int):
+        where = """s.plan_id = %(plan_id)s
+                   AND (%(estado)s = 'todas'
+                        OR (%(estado)s = 'vigente' AND s.fecha_fin > now())
+                        OR (%(estado)s = 'vencida' AND s.fecha_fin <= now()))"""
+        params = {"plan_id": plan_id, "estado": estado, "limit": limit, "offset": offset}
+        with self._pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(f"SELECT count(*) AS total FROM suscripcion s WHERE {where}", params)
+            total = cur.fetchone()["total"]
+            cur.execute(
+                f"""
+                SELECT s.id, s.usuario_id, s.club_id, c.nombre AS club_nombre, s.fecha_inicio, s.fecha_fin,
+                       s.precio_pagado, s.plan_nombre,
+                       CASE WHEN s.fecha_fin > now() THEN 'ACTIVE' ELSE 'EXPIRED' END AS estado
+                FROM suscripcion s LEFT JOIN club c ON c.id = s.club_id
+                WHERE {where}
+                ORDER BY (s.fecha_fin > now()) DESC, s.fecha_fin DESC, s.id
+                LIMIT %(limit)s OFFSET %(offset)s
+                """,
+                params,
+            )
+            return [PlanSuscripcion(**row) for row in cur.fetchall()], total
 
     def get_suscripcion(
         self, *, usuario_id: UUID | None = None, club_id: UUID | None = None

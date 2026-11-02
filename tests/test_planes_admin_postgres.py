@@ -65,9 +65,9 @@ def pool_for(dsn: str, schema: str) -> ConnectionPool:
     return pool
 
 
-def test_the_chain_covers_every_migration_and_012_is_the_last():
-    assert MIGRATIONS[-1].name == "013_plan_institucion.sql"
-    assert [path.name[:3] for path in MIGRATIONS] == [f"{n:03d}" for n in range(1, 14)]
+def test_the_chain_covers_every_migration_and_014_is_the_last():
+    assert MIGRATIONS[-1].name == "014_plan_base_desactivacion.sql"
+    assert [path.name[:3] for path in MIGRATIONS] == [f"{n:03d}" for n in range(1, 15)]
 
 
 def test_all_migrations_in_order_on_an_empty_base_and_again_leave_the_expected_schema(base):
@@ -89,6 +89,12 @@ def test_all_migrations_in_order_on_an_empty_base_and_again_leave_the_expected_s
     assert "plan_suscripcion_tipo_nombre_key" not in constraints
     assert {"plan_suscripcion_precio_check", "plan_suscripcion_categoria_check", "plan_suscripcion_beneficios_check"} <= constraints
     assert setup.execute("SELECT to_regclass(%s)", (f"{schema}.plan_suscripcion_nombre_activo_uq",)).fetchone()[0]
+    assert columns[("plan_suscripcion", "es_base")] == ("NO", "boolean")
+    assert columns[("plan_suscripcion", "fecha_desactivacion")] == ("YES", "timestamp with time zone")
+    assert columns[("plan_suscripcion", "motivo_desactivacion")][0] == "YES"
+    assert columns[("plan_suscripcion", "duracion_dias")][0] == "YES"                       # sin vencimiento
+    assert columns[("suscripcion", "duracion_dias")][0] == "NO" and columns[("transaccion_pago", "duracion_dias")][0] == "NO"
+    assert setup.execute("SELECT to_regclass(%s)", (f"{schema}.plan_suscripcion_base_uq",)).fetchone()[0]
 
 
 def test_the_database_enforces_the_plan_rules(base):
