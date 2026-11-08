@@ -1,7 +1,7 @@
 # Dudas sobre tablas e información necesaria
 
 Todo lo que no pude resolver con el código ni con las bases durante las historias de usuario HU-30 a HU-52
-(clubes, convocatorias, postulaciones, comunicados, pagos, chat, bloqueos, tiempo real y ubicación). Cada duda
+(clubes, convocatorias, postulaciones, comunicados, chat, bloqueos, tiempo real y ubicación). Cada duda
 dice **qué asumí mientras tanto**, **por qué importa** y deja un espacio **Respuesta** para completar.
 
 Este documento solo reúne las preguntas. El seguimiento de lo que falta construir está en
@@ -15,14 +15,14 @@ Cómo leerlo: las dudas de la sección 1 condicionan a todas las demás, convien
 
 | Base | Tablas que ya existían en `public` |
 | --- | --- |
-| `sportmatch_users` | `usuario`, `rol`, `usuario_deporte`, `preferencia_usuario`, `disponibilidad`, `consent`, `audit_events`, `notificacion`, `plan`, `membresia`, `pago` |
+| `sportmatch_users` | `usuario`, `rol`, `usuario_deporte`, `preferencia_usuario`, `disponibilidad`, `consent`, `audit_events`, `notificacion` |
 | `sportmatch_matching` | `match`, `solicitud_match`, `calificacion_usuario`, `ubicacion_usuario` (con coordenadas y columna geoespacial), `deporte`, y las de PostGIS (`spatial_ref_sys`) |
 | `sportmatch_activities` | `actividad`, `inscripcion_actividad`, `comunidad`, `miembro_comunidad`, `deporte` |
 | `sportmatch_clubs` | `club` (id, usuario_id, nombre, descripcion, email_contacto, telefono, direccion, latitud, longitud, logo, is_active, fecha_creacion), `club_deporte`, `interesado_club`, `deporte` |
 
 - Roles: solo existen `postgres` y `sportmatch_users`. No existen los de matching, activities ni clubs.
 - Ninguna de las cuatro bases tiene tablas de los servicios nuevos (`matching_api.*`, `activities_api.*`,
-  `clubs_api.*`, convocatorias, postulaciones, comunicados, pagos de clubes, `ubicacion_actual`…).
+  `clubs_api.*`, convocatorias, postulaciones, comunicados, `ubicacion_actual`…).
 - `sportmatch_users` tiene 0 usuarios y no tiene las migraciones 005 a 008 de Ms_Users.
 - Un intento de crear roles y aplicar migraciones se **deshizo por completo** a pedido de quien dirige el proyecto.
 
@@ -87,24 +87,6 @@ No existe ninguna tabla antigua equivalente: `convocatoria` y `postulacion_convo
 | 4.3 | ¿Hay un **límite de frecuencia**? | No. Un doble clic publica y notifica dos veces. | Evita saturar a los deportistas. | |
 | 4.4 | ¿Cuánto del texto puede mostrar la alerta push? | Los primeros 120 caracteres. | Misma política de privacidad que el chat (ver 6.9). | |
 | 4.5 | ¿Una persona puede **silenciar a un club**? | No. | Mismo mecanismo que el silencio entre personas, pero con clubes. | |
-
----
-
-## 5. Pagos con Webpay Plus (HU-40)
-
-| # | Duda | Qué asumí | Por qué importa | Respuesta |
-| --- | --- | --- | --- | --- |
-| 5.1 | **Ya existen `plan`, `membresia` y `pago` en `sportmatch_users`.** ¿Son los vigentes? | No los usé. Creé `plan_suscripcion`, `transaccion_pago` y `suscripcion` en `ms-club`. Los README de Ms_Users se contradicen sobre si esas tablas siguen en uso. | Habría dos modelos de suscripción. Si las antiguas son las vigentes, hay que reescribir los pagos sobre ellas (y entonces no vivirían en `ms-club`). | |
-| 5.2 | ¿Cuáles son los **planes reales**: nombres, precios, duración, y si el precio incluye IVA? | Dos planes de prueba (`db/seeds`). | Sin catálogo no se puede cobrar. | |
-| 5.3 | ¿Qué **beneficios** desbloquea cada plan? | Activar los beneficios es solo registrar la suscripción `ACTIVE`. Ningún servicio la consulta. | Sin esto el pago no cambia nada en la app. | |
-| 5.4 | ¿Se puede **cambiar de plan** a mitad de periodo? ¿Cómo se prorratea? ¿Hay renovación automática? | Con otro plan vigente, `initiate` responde 409. Webpay Plus cobra una sola vez; el cobro recurrente exige otro producto (OneClick). | Hoy cambiar de plan es imposible hasta que venza. | |
-| 5.5 | ¿Un comprador puede tener **más de una suscripción**? ¿Un club y un deportista a la vez? | Una por comprador; el deportista compra planes `USUARIO` y el `club_admin`, planes `CLUB`. | Define la clave de la tabla `suscripcion`. | |
-| 5.6 | ¿Qué hacer con los **pagos que nunca se confirman** (se pierde el retorno)? | Quedan `PENDING`; la suscripción no se activa aunque Webpay haya autorizado. | Hay que decidir si se consulta a Transbank (su documentación habla de 7 días) y quién lo ejecuta. | |
-| 5.7 | ¿Cuáles son las **credenciales de producción** y los requisitos de Transbank para pasar de integración a producción? | Se usan las credenciales públicas de prueba en `INTEGRATION`. | No se puede salir a producción sin ellas. Además `WEBPAY_PUBLIC_URL` debe ser `https`. | |
-| 5.8 | ¿**A qué página web vuelve el usuario** después de pagar? | El retorno redirige a `WEBPAY_FRONTEND_RETURN_URL`. El ejemplo que dejé es el deep link de la app (`sportmatchapp://pago`). | Se aclaró que `ms-club` es para el sitio web: debe ser una página del sitio, y su origen debe estar en `CORS_ALLOWED_ORIGINS` del gateway. | |
-| 5.9 | ¿Hay **reembolsos**, historial de pagos, boleta o aviso de vencimiento? | Nada de eso existe. | La boleta electrónica del SII queda fuera. | |
-| 5.10 | ¿Se debe exigir **correo verificado** antes de cobrar? | Solo se usa el rol del token. | Ms_Users ya sabe si el correo está verificado. | |
-| 5.11 | ¿Qué datos de la tarjeta pueden guardarse? | Solo los últimos 4 dígitos. | Mínimo para el comprobante. | |
 
 ---
 

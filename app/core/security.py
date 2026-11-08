@@ -14,7 +14,6 @@ JWT_ALGORITHM = "HS256"
 # Roles issued by Ms_Users (see Ms_Users/db/README.md). "usuario" is the athlete
 # role of the original SportMatch database, same as Ms_Users' ATHLETE_ROLES.
 CLUB_ADMIN_ROLE = "club_admin"
-ADMIN_ROLE = "admin"  # platform administrator (HU-56)
 ATHLETE_ROLES = frozenset({"player", "usuario"})
 
 
@@ -32,10 +31,6 @@ class Actor:
     @property
     def is_club_admin(self) -> bool:
         return CLUB_ADMIN_ROLE in self.roles
-
-    @property
-    def is_admin(self) -> bool:
-        return ADMIN_ROLE in self.roles
 
     @property
     def is_athlete(self) -> bool:

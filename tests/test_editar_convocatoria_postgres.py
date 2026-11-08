@@ -15,7 +15,7 @@ from psycopg import sql
 
 import app.repositories.postgres_club_repository as repository_module
 from test_club_admin import nuevo_rut, token  # also sets JWT_SECRET before the app is imported
-from test_planes_admin_postgres import DB, apply, base, build, pool_for  # noqa: F401  (base: fixture)
+from postgres_helpers import DB, apply, base, build, pool_for  # noqa: F401  (base: fixture)
 from test_postulaciones import CHILE, CLUBS_PATH, FakeUsers, perfil
 
 from app.main import create_app

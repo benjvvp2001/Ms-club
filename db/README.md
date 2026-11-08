@@ -62,16 +62,6 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 - `comunicado_destinatario` (migración 005): los deportistas que recibieron cada
   comunicado (`usuario_id` es la cuenta de Ms_Users, sin FK). Se llena al publicar y
   alimenta la bandeja del deportista.
-- `plan_suscripcion` (migración 006): catálogo de planes (`tipo` `USUARIO` o `CLUB`,
-  `precio` en pesos enteros, `duracion_dias`). El servicio solo lo lee; los planes y
-  precios reales los define SportMatch (`seeds/demo_planes.sql` trae dos de PRUEBA).
-- `transaccion_pago` (006): un intento de pago, desde que se crea la transacción en
-  Webpay (`PENDING`) hasta `APPROVED`, `REJECTED` o `CANCELLED`. Comprador: `usuario_id`
-  (cuenta de Ms_Users, sin FK) o `club_id`, exactamente uno. `iniciada_por` es la cuenta
-  que puede confirmarla. `buy_order` y `token_ws` son únicos. De la tarjeta solo se
-  guardan los últimos 4 dígitos.
-- `suscripcion` (006): una fila por deportista o club (índices únicos parciales); renovar
-  la extiende. No guarda estado: `ACTIVE`/`EXPIRED` se calcula con `fecha_fin`.
 - `clubs_api.notification_outbox` (migración 004): eventos para el worker de
   notificaciones de Ms_gateway, con el mismo contrato que `matching_api` y
   `activities_api` (`id`, `user_id`, `kind`, `title`, `body`, `data`,
@@ -89,8 +79,6 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 | `convocatoria` | SELECT, INSERT, UPDATE | 002 (UPDATE también permite el `FOR UPDATE` al postular) |
 | `postulacion_convocatoria` | SELECT, INSERT, UPDATE | 003 |
 | `comunicado_club`, `comunicado_destinatario` | SELECT, INSERT (no se editan ni borran) | 005 |
-| `plan_suscripcion` | SELECT | 006 |
-| `transaccion_pago`, `suscripcion` | SELECT, INSERT, UPDATE (nunca se borran) | 006 |
 | `clubs_api.notification_outbox` | USAGE del esquema; SELECT, INSERT, UPDATE, DELETE | 004 (el servicio inserta; el worker del gateway, con este mismo rol, lee, marca y purga) |
 | `club_administrador` | SELECT, INSERT, DELETE (quitar o salir) | 007 |
 | `club_admin_asignacion` | SELECT, INSERT, UPDATE (marcar aceptada o revocada; nunca se borra) | 009 |
@@ -121,22 +109,22 @@ En pgAdmin, conectado a `sportmatch_clubs` como `postgres`, una vez y en orden:
    la 003. Sin ella fallan las rutas de postulaciones (leen `comentario_club`).
 6. `db/migrations/005_comunicados.sql`: crea las dos tablas de comunicados y da
    permisos al rol. Mismas garantías; requiere la 004 (usa su outbox).
-7. `db/migrations/006_pagos.sql`: planes, transacciones de pago y suscripciones. Mismas
-   garantías. Después, solo en desarrollo, `db/seeds/demo_planes.sql` (como `postgres`)
-   para tener dos planes de prueba.
-8. `db/migrations/007_club_rut_administradores.sql`: `club.rut` y `club_administrador`
+7. `db/migrations/007_club_rut_administradores.sql`: `club.rut` y `club_administrador`
    (con los dueños actuales como `PRINCIPAL`). Mismas garantías. Ya no crea
    `club_invitacion_admin`. Sin ella fallan todas las rutas de administración (la
    autorización lee `club_administrador`).
-9. `db/migrations/008_consultas_club.sql`: `consulta_hilo` y `consulta_mensaje`. Mismas
+8. `db/migrations/008_consultas_club.sql`: `consulta_hilo` y `consulta_mensaje`. Mismas
    garantías; requiere la 007 y el outbox de la 004.
-10. `db/migrations/009_admin_por_correo.sql`: crea `club_admin_asignacion` y elimina
+9. `db/migrations/009_admin_por_correo.sql`: crea `club_admin_asignacion` y elimina
    `club_invitacion_admin` (las invitaciones pendientes se pierden: hay que asignar los
    correos). Mismas garantías; requiere la 007.
-11. `db/migrations/010_consultas_postulantes_canales.sql`: `ON DELETE CASCADE` de
+10. `db/migrations/010_consultas_postulantes_canales.sql`: `ON DELETE CASCADE` de
    `consulta_mensaje` a su hilo, DELETE sobre las consultas y las tablas de canales
    (`club_canal`, `club_canal_miembro`, `club_canal_mensaje`). Mismas garantías;
    requiere la 008.
+
+11. `db/migrations/011_chat_postulantes_convocatoria.sql`: habilitación del chat por convocatoria.
+12. `db/migrations/015_convocatoria_historial.sql`: historial de cambios y avisos al editar convocatorias.
 
 `python -m app.database.migrate` aplica las migraciones con el usuario de `DB_*`;
 con el rol del servicio solo sirve para comprobar que ya están aplicadas.

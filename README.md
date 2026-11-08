@@ -4,8 +4,7 @@ Directorio y perfiles públicos de clubes deportivos (HU-30), administración de
 perfil por el representante del club (HU-31), convocatorias a pruebas de
 jugadores (HU-32), postulación de deportistas a esas convocatorias (HU-33) y
 revisión de candidatos por el club, con aviso al deportista (HU-34) y comunicados
-de los clubes a sus postulantes y miembros (HU-38), pago de planes con Webpay Plus
-(HU-40), club con RUT y varios administradores, y consultas entre deportistas y
+de los clubes a sus postulantes y miembros (HU-38), club con RUT y varios administradores, y consultas entre deportistas y
 clubes (HU-51). Misma arquitectura que `Ms_Users`:
 FastAPI + Pydantic v2, PostgreSQL con psycopg 3 (pool, sin ORM), capas
 `api → services → repositories`, JWT emitido por `Ms_Users`.
@@ -16,13 +15,12 @@ Trabaja sobre las tablas existentes de la base `sportmatch_clubs` (`club`,
 `002_convocatorias.sql` crea la tabla `convocatoria` (un club, muchas convocatorias)
 `003_postulaciones.sql` la tabla `postulacion_convocatoria` y
 `004_revision_postulaciones.sql` los estados de revisión y el outbox de notificaciones y
-`005_comunicados.sql` las tablas de comunicados, `006_pagos.sql` planes, pagos y
-suscripciones, `007_club_rut_administradores.sql` el RUT del club y sus administradores,
+`005_comunicados.sql` las tablas de comunicados, `007_club_rut_administradores.sql` el RUT del club y sus administradores,
 `008_consultas_club.sql` las consultas deportista ↔ club, `009_admin_por_correo.sql`
 las asignaciones de administradores por correo (reemplazan a las invitaciones) y
 `010_consultas_postulantes_canales.sql` el borrado de consultas al rechazar y los canales
 del club, y `011_chat_postulantes_convocatoria.sql` el interruptor del chat de cada
-convocatoria.
+convocatoria. La `015_convocatoria_historial.sql` guarda la edición de convocatorias.
 
 ```
 app/
@@ -31,34 +29,30 @@ app/
   api/v1/convocatorias.py rutas de convocatorias (/api/v1/clubs/announcements, /{id}/announcements)
   api/v1/postulaciones.py rutas de postulaciones y candidatos (/announcements/{id}/applications,
                           /announcements/applications/me, /announcements/applications/{id})
-  api/v1/pagos.py         pagos con Webpay Plus (/api/v1/payments)
   api/v1/administradores.py administradores y asignaciones por correo (/{id}/admins,
                           /{id}/admins/assignments)
   api/v1/consultas.py     consultas deportista ↔ club (/consultas/me, /{id}/consultas)
   api/v1/canales.py       canales del club (/canales/me, /{id}/canales)
   api/dependencies.py     inyección de repositorio y servicio; usuario autenticado (Bearer)
-  core/config.py          DB_*, JWT_*, USERS_*, CLUB_MAX_ADMINS y WEBPAY_*
+  core/config.py          DB_*, JWT_*, USERS_*, CLUB_MAX_ADMINS
   core/security.py        validación del JWT de Ms_Users, roles (club_admin, admin) y correo
   database/               comprobación de conexión al arranque, pool y migrador
   repositories/           contrato ClubRepository + PostgreSQL + mock en memoria
   schemas/                common.py (compartido), club.py (ClubCreate, ClubUpdate...),
                           convocatoria.py (ConvocatoriaCreate, filtros, respuestas),
                           postulacion.py (PostulacionCreate, PostulacionEstadoUpdate, candidatos),
-                          pago.py (PagoIniciar, PagoConfirmar, comprobante, suscripción),
                           administrador.py (asignaciones) y consulta.py (mensajes e hilos)
   services/               ClubService, ConvocatoriaService, PostulacionService,
-                          PagoService, AdministradorService, ConsultaService,
+                          AdministradorService, ConsultaService,
                           authorization.py (administradores del club), rut.py (RUT y DV),
-                          users_client.py (Ms_Users) y webpay.py (Transbank y modo simulado)
+                          users_client.py (Ms_Users)
 db/
   00_create_database.sql  rol sportmatch_clubs (una vez, en pgAdmin)
   migrations/             001: perfil; 002: convocatoria; 003: postulaciones; 004: revisión y outbox;
-                          005: comunicados; 006: planes, pagos y suscripciones;
+                          005: comunicados;
                           007: RUT y administradores; 008: consultas;
                           009: asignaciones de administradores por correo;
                           010: consultas solo con postulantes y canales del club
-  seeds/demo_planes.sql   planes de PRUEBA para desarrollo (no son el catálogo real)
-                          (todas como postgres)
 tests/                    pruebas de la API con el repositorio mock
 ```
 
@@ -106,11 +100,6 @@ tests/                    pruebas de la API con el repositorio mock
 | POST | `/api/v1/clubs/{id}/notices` | admin del club | Publica un comunicado y notifica a su audiencia. |
 | GET | `/api/v1/clubs/{id}/notices` | admin del club | Comunicados que publicó el club, con a cuántos llegó cada uno. |
 | GET | `/api/v1/clubs/notices/me` | Deportista | Mi bandeja de comunicados. |
-| GET | `/api/v1/payments/plans` | Público | Planes disponibles. |
-| POST | `/api/v1/payments/webpay/initiate` | Autenticado | Inicia el pago de un plan. |
-| POST | `/api/v1/payments/webpay/commit` | Autenticado | Confirma el pago al volver de Webpay. |
-| GET | `/api/v1/payments/subscription/me` | Autenticado | Mi suscripción (deportista o club). |
-| GET, POST | `/api/v1/payments/webpay/return` | Navegador | Retorno de Webpay: reenvía a la app. |
 | GET | `/api/v1/clubs/health/ready` | Público | Health check (consulta la base). |
 
 ### Directorio (HU-30)
@@ -381,7 +370,7 @@ se borran.
 Un club tiene varios administradores (cuentas `club_admin` de Ms_Users) en
 `club_administrador`: el `PRINCIPAL`, que lo creó, y los `ADMIN`, que entraron porque el
 principal asignó su correo. Cualquiera de ellos gestiona el club (perfil, deportes,
-convocatorias, candidatos, comunicados, consultas y pagos del club) y ve la lista de
+convocatorias, candidatos, comunicados, consultas del club) y ve la lista de
 administradores y de asignaciones pendientes. El deportista que entra a un club no es
 administrador.
 
@@ -474,64 +463,6 @@ club responde `eliminar` o `mantener` (30 días más, `mantener_hasta`); sin res
 días se elimina. Un mensaje nuevo cancela el aviso. `CANALES_INACTIVIDAD_ENABLED=false`
 lo apaga; solo corre con la base real.
 
-## Pagos con Webpay Plus (HU-40)
-
-Un deportista o un club contrata un plan y paga con Webpay Plus. Las tablas son
-nuevas y propias de este servicio (`plan_suscripcion`, `transaccion_pago`,
-`suscripcion`); no usan las `plan`/`membresia`/`pago` que existen en la base
-`sportmatch_users`.
-
-**Flujo**
-
-1. `GET /api/v1/payments/plans` lista los planes (precio en pesos chilenos).
-2. `POST /api/v1/payments/webpay/initiate` con `{"plan_id": 1}` (`PagoIniciar`, el
-   `InitiatePaymentDto`). Responde `201` con `token_ws`, `url`, `buy_order`,
-   `session_id`, `amount` y `status: "PENDING"`, y registra la transacción.
-   El comprador sale del token (un deportista paga por sí mismo; un `club_admin`,
-   por su club) y el monto es el precio del plan: ninguno viaja en la petición.
-3. La app abre `checkout_url`, un enlace firmado que genera el formulario **POST**
-   con `token_ws`, sin iframe. La web inicia con `client: "web"` y usa el mismo puente.
-4. Webpay devuelve al usuario a `/api/v1/payments/webpay/return`, que confirma
-   con Transbank y lo reenvía (303) a `WEBPAY_FRONTEND_RETURN_URL` (app) o
-   `WEBPAY_WEB_RETURN_URL` (web), con los parámetros como query:
-   `token_ws` si pasó por el formulario; `tbk_token`, `tbk_orden_compra` y
-   `tbk_id_sesion` si canceló; solo los dos últimos si se agotó el tiempo.
-5. La app llama a `POST /api/v1/payments/webpay/commit` con esos parámetros
-   (`PagoConfirmar`, el `CommitPaymentDto`) y la sesión del usuario para recuperar
-   el comprobante o reintentar. Ante una respuesta perdida, el backend consulta el estado.
-
-Configuración, pruebas en Transbank y revisión de la web: [guía Webpay](docs/webpay/README.md).
-
-**Resultado de `commit`**
-
-| Caso | Respuesta | Transacción | Suscripción |
-| --- | --- | --- | --- |
-| Aprobado (`response_code == 0` y `status == AUTHORIZED`) | `200` con el comprobante y la `suscripcion` | `APPROVED` | Se crea o se extiende `duracion_dias` del plan |
-| Rechazado por el emisor o Webpay | `400`, `detail` y `transaccion` (comprobante) | `REJECTED` | Sin cambios |
-| Cancelado o tiempo agotado (`tbk_*`) | `400`, igual | `CANCELLED` | Sin cambios |
-| Webpay no responde, o responde otra orden o monto | `502` | Sigue `PENDING` | Sin cambios |
-| Transacción inexistente o de otra cuenta | `404` | Sin cambios | Sin cambios |
-
-Confirmar dos veces la misma transacción devuelve el mismo resultado sin volver a
-llamar a Webpay, ni cobrar, ni extender la suscripción. Solo la cuenta que inició
-el pago puede confirmarlo.
-
-**Suscripción.** Una por deportista o club. Pagar el mismo plan estando vigente suma
-los días al fin actual; si ya venció, parte desde hoy. Con otro plan vigente se
-rechaza al iniciar (`409`), para no perder días ya pagados. El estado `ACTIVE`/`EXPIRED`
-se calcula al leer: nada tiene que correr cuando vence. `GET /subscription/me` la
-muestra. Un plan `USUARIO` solo lo compran deportistas y uno `CLUB`, representantes
-con un club creado.
-
-**Modo de pruebas.** `WEBPAY_MOCK_MODE=true` reemplaza a Webpay por una página
-simulada de este servicio (`/api/v1/payments/webpay/mock`) con tres botones: pagar,
-simular rechazo y anular. No cobra nada y aprueba lo que el usuario elija, así que el
-servicio **no arranca** si se combina con `WEBPAY_ENVIRONMENT=PRODUCTION`. Con
-`false` (el valor por defecto) se usa el adaptador `TransbankWebpay`, que en
-`INTEGRATION` emplea las credenciales públicas de prueba de Transbank. Para usar el
-SDK oficial, se implementa `WebpayGateway` (`create_transaction`,
-`commit_transaction`) y se pasa a `create_app()`; nada más cambia.
-
 ## Base de datos y ejecución
 
 Variables en `.env` (ver `.env.example`): `DB_HOST`, `DB_PORT`, `DB_USER`,
@@ -540,11 +471,7 @@ Variables en `.env` (ver `.env.example`): `DB_HOST`, `DB_PORT`, `DB_USER`,
 `USERS_SERVICE_URL` (por defecto `http://127.0.0.1:8001`) y `USERS_TIMEOUT_SECONDS`
 para pedir el perfil deportivo y los nombres a Ms_Users. Para postular, Ms_Users debe
 estar corriendo; el resto del servicio no lo necesita (sin él, los nombres quedan
-neutros). `CLUB_MAX_ADMINS` (3 a 100, por defecto 10) limita los administradores por club. Los pagos usan `WEBPAY_MOCK_MODE`,
-`WEBPAY_ENVIRONMENT`, `WEBPAY_COMMERCE_CODE`, `WEBPAY_API_KEY`, `WEBPAY_PUBLIC_URL`,
-`WEBPAY_FRONTEND_RETURN_URL` y `WEBPAY_TIMEOUT_SECONDS` (ver `.env.example`); las
-primeras dos URL son obligatorias y la API key nunca se registra en logs. Igual que
-Ms_Users, el `.env` se carga con `--env-file` de uvicorn.
+neutros). `CLUB_MAX_ADMINS` (3 a 100, por defecto 10) limita los administradores por club. Igual que Ms_Users, el `.env` se carga con `--env-file` de uvicorn.
 
 Al arrancar, el servicio valida la configuración JWT, se conecta una vez a
 PostgreSQL, comprueba que la base sea `DB_NAME` y registra `Connected to
@@ -559,13 +486,12 @@ Una vez, en pgAdmin conectado a `sportmatch_clubs` como `postgres`, en este orde
 4. `db/migrations/003_postulaciones.sql`.
 5. `db/migrations/004_revision_postulaciones.sql`.
 6. `db/migrations/005_comunicados.sql`.
-7. `db/migrations/006_pagos.sql`.
-8. `db/migrations/007_club_rut_administradores.sql`.
-9. `db/migrations/008_consultas_club.sql`.
-10. `db/migrations/009_admin_por_correo.sql`.
-11. `db/migrations/010_consultas_postulantes_canales.sql`.
-12. `db/migrations/011_chat_postulantes_convocatoria.sql`.
-13. Solo en desarrollo, para tener planes de prueba: `db/seeds/demo_planes.sql`.
+7. `db/migrations/007_club_rut_administradores.sql`.
+8. `db/migrations/008_consultas_club.sql`.
+9. `db/migrations/009_admin_por_correo.sql`.
+10. `db/migrations/010_consultas_postulantes_canales.sql`.
+11. `db/migrations/011_chat_postulantes_convocatoria.sql`.
+12. `db/migrations/015_convocatoria_historial.sql`.
 
 ```bash
 pip install -e ".[dev]"
@@ -573,7 +499,6 @@ uvicorn app.main:app --env-file .env --port 8004 --reload
 python -m pytest
 ```
 
-Puerto 8004 (users 8001, matching 8002, activities 8003). Aún no está
-registrado en el gateway ni en `Ms_gateway/compose.yaml`.
+Puerto 8004 (users 8001, matching 8002, activities 8003). El gateway publica `/api/v1/clubs/*` y configura `CLUBS_SERVICE_URL` para este servicio.
 
 Lo que falta por hacer está en [PENDIENTES.md](PENDIENTES.md).

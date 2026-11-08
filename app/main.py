@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -17,25 +16,18 @@ from app.api.v1.clubs import router as clubs_router
 from app.api.v1.comunicados import router as comunicados_router
 from app.api.v1.consultas import router as consultas_router
 from app.api.v1.convocatorias import router as convocatorias_router
-from app.api.v1.pagos import router as pagos_router
-from app.api.v1.planes_admin import router as planes_admin_router
 from app.api.v1.postulaciones import router as postulaciones_router
 from app.core.config import (
-    WebpaySettings,
     get_club_max_admins,
     get_database_settings,
     get_settings,
     get_users_service_settings,
-    get_webpay_settings,
 )
 from app.database.session import check_connection, create_pool
 from app.repositories.base import ClubRepository
 from app.repositories.postgres_club_repository import PostgresClubRepository
 from app.services import canal_inactividad
-from app.services.plan_audit import InternalAuditClient, PlanAuditor
-from app.services.account_names import AccountDirectory, InternalAccountsClient
 from app.services.users_client import AthleteProfiles, UsersClient
-from app.services.webpay import WebpayGateway, build_webpay
 
 
 def _finite_or_text(value: float):
@@ -47,11 +39,7 @@ def _finite_or_text(value: float):
 def create_app(
     repository: ClubRepository | None = None,
     users: AthleteProfiles | None = None,
-    webpay: WebpayGateway | None = None,
-    webpay_settings: WebpaySettings | None = None,
     inactividad: bool | None = None,
-    plan_auditor: PlanAuditor | None = None,
-    account_names: AccountDirectory | None = None,
 ) -> FastAPI:
     """Create the service without routes outside the approved clubs prefix.
 
@@ -59,8 +47,7 @@ def create_app(
     (DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME) and opens the pool on
     server startup, not at import time; it refuses to start if that fails. Tests
     inject a MockClubRepository instead so they don't need a live database, and a
-    fake users source so applying never calls Ms_Users. The same goes for the
-    Webpay gateway (WEBPAY_* variables): tests inject a MockWebpay.
+    fake users source so applying never calls Ms_Users.
 
     The hourly check of inactive channels (G4) runs in a daemon thread while
     the server is up: by default only with the real database and unless
@@ -68,7 +55,6 @@ def create_app(
     """
     owns_pool = repository is None
     owns_users = users is None
-    owns_webpay = webpay is None
     pool_holder: dict[str, object] = {}
 
     @asynccontextmanager
@@ -90,15 +76,6 @@ def create_app(
                 trust_env=False,
             )
             app.state.users = UsersClient(http_client)
-            if plan_auditor is None:
-                # HU-56: plan changes are audited in Ms_Users with the shared secret (INTERNAL_SERVICE_TOKEN).
-                app.state.plan_auditor = InternalAuditClient(http_client, os.getenv("INTERNAL_SERVICE_TOKEN"))
-            if account_names is None:
-                # HU-56: the subscribers' names come from Ms_Users with the same shared secret.
-                app.state.account_names = InternalAccountsClient(http_client, os.getenv("INTERNAL_SERVICE_TOKEN"))
-        if owns_webpay:
-            app.state.webpay_settings = get_webpay_settings()
-            app.state.webpay = build_webpay(app.state.webpay_settings)
         worker = None
         run_worker = (
             inactividad if inactividad is not None else owns_pool and canal_inactividad.enabled()
@@ -111,8 +88,6 @@ def create_app(
         finally:
             if worker is not None:
                 worker.stop()
-            if owns_webpay and getattr(app.state, "webpay", None) is not None:
-                app.state.webpay.close()
             if http_client is not None:
                 http_client.close()
             pool = pool_holder.get("pool")
@@ -130,14 +105,6 @@ def create_app(
         app.state.repository = repository
     if users is not None:
         app.state.users = users
-    if webpay is not None:
-        app.state.webpay = webpay
-    if webpay_settings is not None:
-        app.state.webpay_settings = webpay_settings
-    if plan_auditor is not None:
-        app.state.plan_auditor = plan_auditor
-    if account_names is not None:
-        app.state.account_names = account_names
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, error: RequestValidationError) -> JSONResponse:
@@ -169,8 +136,6 @@ def create_app(
     app.include_router(consultas_router)
     app.include_router(canales_router)
     app.include_router(administradores_router)
-    app.include_router(planes_admin_router)
-    app.include_router(pagos_router)
     app.include_router(convocatorias_router)
     app.include_router(clubs_router)
 

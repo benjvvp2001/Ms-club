@@ -13,7 +13,7 @@ Audiencia = Literal["TODOS", "POSTULANTES", "MIEMBROS"]
 Prioridad = Literal["NORMAL", "URGENTE"]
 
 # Who receives a notice, from the estado of their postulaciones to the club's
-# convocatorias. There is no follow/subscription table yet, so TODOS is the
+# convocatorias. There is no follower table yet, so TODOS is the
 # club's whole community: everyone who is applying or was accepted.
 #   POSTULANTES: applications still in play.
 #   MIEMBROS:    athletes accepted (confirmed) in a convocatoria.

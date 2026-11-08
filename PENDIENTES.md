@@ -3,8 +3,7 @@
 Todo lo que queda abierto en `ms-club`: tareas por hacer y decisiones tomadas
 durante el desarrollo que el equipo debe confirmar. Cubre la HU-30 (directorio y
 perfiles de clubes), HU-31 (administrar perfil de club), HU-32 (convocatorias),
-HU-33 (postulaciones), HU-34 (revisión de candidatos), HU-38 (comunicados), HU-40
-(pago de planes con Webpay Plus), HU-49 (lista de chats), HU-50 (ubicación y archivos en el chat),
+HU-33 (postulaciones), HU-34 (revisión de candidatos), HU-38 (comunicados), HU-49 (lista de chats), HU-50 (ubicación y archivos en el chat),
 HU-51 (bloquear y silenciar) y HU-52 (tiempo real y push de mensajes). La HU-49, la HU-50 y la HU-52 están
 **implementadas en `ms-machine`** y la HU-51 en **`Ms_Users`**, no en ms-club, pero su seguimiento queda aquí. Este archivo se actualiza con cada historia; lo ya
 implementado está en el [README](README.md).
@@ -16,19 +15,7 @@ Las dudas sobre tablas e información que faltan por confirmar están reunidas e
 - [ ] En pgAdmin, conectado a `sportmatch_clubs` como `postgres`, ejecutar
       `db/00_create_database.sql` con el `DB_PASSWORD` de `.env` (crea el rol
       `sportmatch_clubs`, que hoy no existe).
-- [ ] En el mismo lugar y en orden: `db/migrations/001_club_profile_admin.sql`,
-      `002_convocatorias.sql`, `003_postulaciones.sql`,
-      `004_revision_postulaciones.sql`, `005_comunicados.sql` y `006_pagos.sql`. Sin la
-      003 fallan también las rutas de convocatorias y el perfil de club (informan cupos
-      y convocatorias abiertas); sin la 004 fallan las de postulaciones (leen
-      `comentario_club`); la 005 solo afecta a las rutas de comunicados y la 006 a las
-      de pagos.
-- [ ] Para probar pagos, ejecutar también `db/seeds/demo_planes.sql` como `postgres`
-      (dos planes de PRUEBA) y dejar `WEBPAY_MOCK_MODE=true` en el `.env` local.
-- [ ] **Agregar las variables `WEBPAY_*` al `.env` de cada integrante** (copiarlas de
-      `.env.example`): el servicio no arranca sin `WEBPAY_PUBLIC_URL` ni
-      `WEBPAY_FRONTEND_RETURN_URL`. El `.env` de esta máquina ya las tiene, con el modo
-      simulado activo.
+- [ ] En el mismo lugar, aplicar las migraciones disponibles en `db/migrations` en orden de nombre, desde `001_club_profile_admin.sql` hasta `015_convocatoria_historial.sql`, conservando sus identificadores. La 003 permite las postulaciones, la 004 agrega `comentario_club` y notificaciones, la 005 los comunicados, la 007 los administradores y las siguientes las consultas, canales y edición de convocatorias.
 - [ ] Reinstalar dependencias (`pip install -e ".[dev]"`): se agregaron `PyJWT`,
       `email-validator`, `httpx` y `tzdata`.
 - [ ] Arrancar con `uvicorn app.main:app --env-file .env --port 8004` y confirmar
@@ -49,7 +36,7 @@ Las dudas sobre tablas e información que faltan por confirmar están reunidas e
         con la contraseña de su `.env`.
       - Las bases tienen tablas antiguas en `public` (`usuario`, `match`, `solicitud_match`, `actividad`, `club`,
         `club_deporte`, `interesado_club`…), pero ninguna de las nuevas de los servicios (`matching_api.*`,
-        `activities_api.*`, `clubs_api.*`, ni `convocatoria`, `postulacion_convocatoria`, `comunicado_*`, planes y pagos).
+        `activities_api.*`, `clubs_api.*`, ni `convocatoria`, `postulacion_convocatoria`, `comunicado_*`).
       - Decidir entre (a) **adaptar el código a las tablas existentes**, como se hizo con `club` y `club_deporte` en
         `ms-club`: matching sobre `match`/`solicitud_match`, actividades sobre `actividad`/`inscripcion_actividad`; o
         (b) aplicar las migraciones de cada servicio (tablas nuevas y columnas nuevas en `club`).
@@ -102,28 +89,12 @@ Se tomaron para cumplir los criterios; cambiarlas es acotado.
 | Repetir el mismo estado no genera otro aviso (solo actualiza el comentario) | Igual que Matching y Actividades: operaciones sin cambios no notifican | `review_postulacion` en los repositorios |
 | Comunicados bajo `/api/v1/clubs/{id}/notices` y `/api/v1/clubs/notices/me` (la HU-38 proponía `.../announcements`) | `/announcements` ya es de las convocatorias (HU-32): `POST /{id}/announcements` publica una convocatoria | `app/api/v1/comunicados.py` |
 | Campo `audiencia` en snake_case/español (la HU decía `audienciaTarget`) | Misma convención que el resto de la API (`categoria_edad`, `deporte_id`...) | `ComunicadoCreate` en `app/schemas/comunicado.py` |
-| **Audiencia sin tabla de seguidores**: `POSTULANTES` = postulaciones `PENDIENTE`/`PRESELECCIONADO`; `MIEMBROS` = `ACEPTADO`; `TODOS` = ambos grupos (nunca `RECHAZADO`) | No existe seguimiento ni suscripción a clubes; `interesado_club` está en la base pero su significado no está definido y no se pudo leer | `ESTADOS_POR_AUDIENCIA` en `app/schemas/comunicado.py` |
+| **Audiencia sin tabla de seguidores**: `POSTULANTES` = postulaciones `PENDIENTE`/`PRESELECCIONADO`; `MIEMBROS` = `ACEPTADO`; `TODOS` = ambos grupos (nunca `RECHAZADO`) | No existe seguimiento de clubes; `interesado_club` está en la base pero su significado no está definido y no se pudo leer | `ESTADOS_POR_AUDIENCIA` en `app/schemas/comunicado.py` |
 | La audiencia se resuelve y guarda al publicar (`comunicado_destinatario`) | La bandeja muestra exactamente lo notificado, aunque luego cambien las postulaciones; quien se postula después no recibe avisos antiguos | `create_comunicado` en los repositorios |
 | Un club inactivo no puede publicar comunicados (409), pero sí consultar los suyos | Igual que con las convocatorias | `app/services/comunicado_service.py` |
 | Publicar para una audiencia sin destinatarios responde 201 con `destinatarios: 0` | No es un error del club; la cifra le avisa que no llegó a nadie | `app/services/comunicado_service.py` |
 | Los comunicados no se editan, borran ni se programan | La HU solo pide emitir y consultar; el rol del servicio no tiene UPDATE/DELETE sobre ellos | migración 005 |
 | La alerta lleva solo los primeros 120 caracteres; el texto completo se lee en la app | La alerta puede verse en la pantalla bloqueada | `_PREVIEW_MAX` en `app/services/comunicado_service.py` |
-| **Los pagos viven en ms-club con tablas nuevas** (`plan_suscripcion`, `transaccion_pago`, `suscripcion`), sin usar las `plan`/`membresia`/`pago` que ya existen en la base `sportmatch_users` | Los README de Ms_Users se contradicen (uno dice que siguen en USERS, otro que pasan a clubs); esas tablas son de otra base, no se pueden leer ni cambiar con este rol, y no guardan token ni sesión de Webpay. La HU pedía `TransaccionPago` y `SuscripcionUsuario` | `db/migrations/006_pagos.sql` |
-| La `suscripcion` sirve a deportistas y a clubes (una fila por comprador) | La HU habla de "usuario/club comprador" | `006_pagos.sql` |
-| Estados en inglés (`PENDING`, `APPROVED`, `REJECTED`, `CANCELLED`, `ACTIVE`, `EXPIRED`) | Los pidió la HU; el resto de la API está en español | `app/schemas/pago.py`, `006_pagos.sql` |
-| Rutas bajo `/api/v1/payments` (no `/api/v1/clubs`) | La HU propone ese prefijo; los pagos no son solo de clubes | `app/api/v1/pagos.py` |
-| El comprador sale del token y el monto es el precio del plan; el cliente solo envía `plan_id` | Evita que alguien pague por otra cuenta o elija el monto | `PagoService.initiate` |
-| Un deportista solo compra planes `USUARIO`; un `club_admin`, planes `CLUB` y con club ya creado | Un plan de club se cobra a su club | `PagoService._comprador` |
-| Un comprador tiene una sola suscripción; con otro plan vigente, `initiate` responde 409 | Cambiar de plan a mitad de periodo perdería o regalaría días; falta definir cómo se prorratea | `PagoService.initiate` |
-| Renovar el mismo plan suma los días al fin vigente (o parte de hoy si ya venció) | La HU pide "extender la vigencia (+30 días)" | `settle_transaccion` en los repositorios |
-| Pago rechazado o cancelado responde **400** con el comprobante en `transaccion` | La HU pide 400 en rechazos y el cliente necesita el comprobante | `app/api/v1/pagos.py` |
-| Cancelación y tiempo agotado (parámetros `TBK_*`) pasan la transacción a `CANCELLED`, sin llamar a Webpay | Así lo describe la documentación de Transbank; tienen prioridad sobre `token_ws` | `PagoConfirmar` en `app/schemas/pago.py` |
-| El backend tiene un puente `/api/v1/payments/webpay/return` que redirige a la app | Webpay vuelve por GET (o POST en integración) a una URL; una app móvil o SPA necesita ese salto, y no se acepta una URL de retorno elegida por el cliente | `webpay_return` en `app/api/v1/pagos.py` |
-| `WEBPAY_MOCK_MODE` vale `false` si no se define, y no se permite con `WEBPAY_ENVIRONMENT=PRODUCTION` | Una variable olvidada nunca debe convertir los pagos en aprobaciones gratis | `get_webpay_settings` en `app/core/config.py` |
-| Adaptador propio de la API REST de Transbank (sin el SDK oficial) | Evita una dependencia; el contrato `WebpayGateway` permite cambiarlo por el SDK sin tocar nada más | `app/services/webpay.py` |
-| En `INTEGRATION` se usan las credenciales públicas de prueba de Transbank si no se definen otras | Están en su documentación y en sus SDK; no cobran | `app/core/config.py` |
-| Solo se guardan los últimos 4 dígitos de la tarjeta | Datos mínimos | `webpay.py`, `transaccion_pago.card_last4` |
-| El estado de la suscripción (`ACTIVE`/`EXPIRED`) se calcula al leer | No hay que correr nada cuando vence | `get_suscripcion` en los repositorios |
 | **HU-49 se implementó en `ms-machine` (Matching)**, no en ms-club ni en un `ms-chat` nuevo | El único chat con mensajes está ahí (`matching_api.messages`) y la app ya lo usa; `Ms_activities` no tiene chat (su README deja el chat grupal fuera de alcance). Decidido con el equipo tras comparar las opciones | `ms-machine/` |
 | No se crearon las tablas `conversations`, `conversation_participants` ni `messages` de la HU: una conversación es un match aceptado (`matching_api.requests`) y los mensajes son `matching_api.messages` | Crearlas habría duplicado el chat y dejado fuera todos los mensajes existentes | `ms-machine/db/migrations/004_message_read_state.sql` |
 | El estado de lectura es `messages.read_at` (fecha, nulo = sin leer) y la API expone también `is_read` | `read_at` da más información que un booleano (el acuse de lectura trae su hora) | `004_message_read_state.sql`, `app/schemas/matching.py` |
@@ -155,8 +126,6 @@ Se tomaron para cumplir los criterios; cambiarlas es acotado.
 | El cliente debe llamar a `PATCH /chats/{id}/read` al recibir `new_message` con el chat abierto; el servidor no marca leído por su cuenta | Mantener una sola regla de lectura (la de la HU-49) | `ms-machine/README.md` |
 | El evento `new_message` lleva el mensaje en snake_case (igual que REST) y el resto en camelCase (`conversationId`) | El contrato de eventos pedido es camelCase; el objeto del mensaje ya lo consume la app | `realtime.py` |
 | **Gateway: `GET /api/v1/users/blocks/check` no se expone a la app** | Es para que otros servicios consulten bloqueos con el token de una de las dos personas; la app no lo necesita, y exponerlo sin necesidad ofrece una vía más para sondear bloqueos | `Ms_gateway/gateway/app/api/routes/users.py` |
-| Gateway: las páginas simuladas de Webpay (`/webpay/mock*`) se reenvían siempre, sin token | En desarrollo el navegador del usuario debe llegar a ellas; ms-club responde 404 salvo con `WEBPAY_MOCK_MODE=true`, y se prueba | `Ms_gateway/gateway/app/api/routes/clubs.py` |
-| Gateway: el proxy reenvía `Location` solo en respuestas 301/302/303/307/308 | Sin eso, el retorno de Webpay (303 hacia la app) llegaba sin destino; reenviarlo en otras respuestas no tiene sentido | `forward_request` en `routes/users.py` |
 | Gateway: en cada grupo de rutas, las fijas (`/me`, `/deportes`, `/notices/me`...) van antes que las que llevan identificador | Para que una pública como `/api/v1/clubs/{club_id}` no tape a una privada como `/api/v1/clubs/me` y se salte la comprobación de sesión del gateway | `Ms_gateway/gateway/app/api/routes/clubs.py` |
 | Gateway: ms-club es opcional (sin `CLUBS_SERVICE_URL` responde 503 y la disponibilidad no lo espera) | Igual que los demás servicios; no obliga a tenerlo para arrancar | `Ms_gateway/gateway/app/core/config.py` |
 | **Ubicación del club: fija, la define quien crea el club, y solo se muestra.** El usuario la ve y decide por sí mismo si postula; `ms-club` no ordena ni filtra por cercanía al usuario | Los campos son `direccion`, `comuna`, `provincia`, `latitud` y `longitud` (las dos últimas ya existen en tu tabla `club`; `comuna` y `provincia` son columnas nuevas de la migración 001, aún sin aplicar). La ubicación **móvil** del usuario se usa solo para recomendar usuarios cercanos al hacer match, en Ms_Users/Matching, no aquí. El filtro `zona` de clubes sigue siendo por texto | decisión de producto del 2026-10-14 |
@@ -262,66 +231,6 @@ mock, a los DTOs y a los tests.
 - [ ] El envío escribe una fila de outbox por destinatario en una sola transacción;
       está bien para cientos o pocos miles de postulantes. Con audiencias mucho
       mayores (seguidores masivos), pasar a envío por lotes.
-
-## 9. Pagos con Webpay Plus (HU-40)
-
-**Qué está verificado y qué no.** Con la API real de Transbank (entorno de integración,
-credenciales públicas de prueba): crear una transacción devuelve el token de 64
-caracteres y la URL del formulario, y confirmar sin haber pagado responde 422 (el
-servicio lo traduce a 502 y deja la transacción `PENDING`). **No se ha probado un pago
-completo**: eso exige pagar en el formulario de Webpay con una tarjeta de prueba, y la
-lectura de una respuesta aprobada real está comprobada solo contra el formato que
-describe la documentación. Tampoco se probó con dos conexiones simultáneas reales a
-PostgreSQL; la exactitud de "una sola vez" se apoya en un `UPDATE ... WHERE status =
-'PENDING'` y en un upsert atómico, verificados en PostgreSQL y por tests.
-
-- [ ] **Probar un pago completo en integración**: `WEBPAY_MOCK_MODE=false`, iniciar un
-      pago, pagar con una tarjeta de prueba de Transbank y confirmar; revisar la
-      respuesta aprobada y la rechazada.
-- [ ] **Los beneficios aún no se aplican**: "activar los beneficios" hoy es registrar la
-      suscripción `ACTIVE`. Ningún servicio la consulta todavía. Falta definir qué
-      desbloquea cada plan (publicar convocatorias, comunicados, más postulaciones...) y
-      aplicarlo donde corresponda.
-- [ ] **Catálogo real de planes**: hoy solo existen dos planes de prueba (`db/seeds`).
-      Definir nombres, precios, duración, y si el precio incluye IVA.
-- [ ] **Pagos que nunca se confirman**: si el usuario paga y se pierde el retorno (cierra
-      la app, se cae la conexión, vence la sesión de 30 min), la transacción queda
-      `PENDING` y la suscripción no se activa aunque Webpay haya autorizado el pago.
-      Falta un proceso que consulte a Transbank el estado de las `PENDING` (la
-      documentación indica 7 días de consulta) y las cierre. Confirmar con Transbank qué
-      pasa con una transacción que nunca se confirma.
-- [ ] **Credenciales y puesta en producción**: pedir el código de comercio y la API key de
-      producción, guardarlos solo en el entorno del servidor, y revisar con Transbank los
-      requisitos para pasar de integración a producción. `WEBPAY_PUBLIC_URL` debe ser
-      `https` en producción.
-- [x] Gateway: rutas de `/api/v1/payments` (públicas: `plans`, `webpay/return`, `webpay/mock*`; con token:
-      `initiate`, `commit` y `subscription/me`) y reenvío de la redirección `303` del retorno de Webpay.
-      Probado de punta a punta con el gateway y ms-club como servidores reales (15 de 15).
-- [ ] `WEBPAY_PUBLIC_URL` de ms-club debe ser la dirección del gateway que alcanza el navegador del
-      usuario, no la interna de Docker.
-- [ ] Frontend: pantalla de planes; enviar al navegador a `url` con un formulario POST
-      (`token_ws`), nunca en iframe; recibir el retorno (`sportmatchapp://pago?token_ws=...`
-      o la página web) y llamar a `commit`; pantallas de comprobante, rechazo y
-      cancelación. El `token_ws` vive 5 minutos antes de pagar y el JWT 30: si venció,
-      volver a iniciar sesión antes de confirmar.
-- [ ] Reembolsos y anulaciones: no hay forma de revertir un pago desde el servicio.
-- [ ] Historial de pagos del usuario (`GET transactions/me`), correo o boleta de
-      respaldo (la boleta electrónica del SII queda fuera), y aviso al usuario cuando su
-      suscripción esté por vencer (se puede usar el outbox de notificaciones).
-- [ ] Cambio de plan con una suscripción vigente (hoy responde 409) y renovación
-      automática: Webpay Plus cobra una sola vez; para cobros recurrentes habría que usar
-      otro producto de Transbank (OneClick).
-- [ ] Si un usuario inicia pagos de dos planes distintos antes de pagar el primero y
-      paga ambos, la suscripción queda con el plan del último pago aprobado y con los
-      días de los dos. Es poco probable; se descartó bloquearlo para no rechazar un pago
-      ya autorizado por Webpay.
-- [ ] Doble clic en "pagar" crea dos transacciones `PENDING` en Webpay (inofensivo, no se
-      cobra ninguna hasta que se confirma). Evaluar idempotencia o un límite de frecuencia
-      por cuenta para no inundar a Transbank de transacciones.
-- [ ] El servicio no pide a Ms_Users confirmar que el correo del deportista está
-      verificado antes de cobrar; solo usa el rol del token.
-- [ ] Retirar o unificar las tablas `plan`/`membresia`/`pago` de `sportmatch_users`
-      (son de otro equipo) para que no queden dos modelos de suscripción.
 
 ## 10. Lista de chats con mensajes no leídos (HU-49, en `ms-machine`)
 
@@ -493,14 +402,14 @@ gateway**, que todavía no reenvía WebSockets.
       Tests: Ms_Users 5 nuevos (suite completa pasa), gateway 1 nuevo (151 pasan), web con `tsc` y `eslint` limpios.
       **No probado de punta a punta contra PostgreSQL**: depende de que exista la base de ms-club (primer punto de abajo).
 - [ ] **Para que el registro se guarde de verdad:** como `postgres`, ejecutar en `sportmatch_clubs` `db/00_create_database.sql` y las
-      migraciones `001` a `005` (la `006` es de pagos y puede esperar); Ms_Users debe tener el rol `club_admin` en su tabla `rol`.
+      migraciones `001` a `005`; Ms_Users debe tener el rol `club_admin` en su tabla `rol`.
 - [x] El sitio dejó los datos simulados: inicio de sesión, directorio y perfil público, crear y editar el club,
       convocatorias, postulantes y avisos usan el Gateway (`NEXT_PUBLIC_API_URL`). Probado en un navegador real (Edge)
       contra Gateway, Ms_Users y ms-club **en memoria**: 41 de 41 comprobaciones, repetidas. Detalle en `sportmatch-web/README.md`.
 - [ ] **Falta conectar ms-club a su base de datos real** (`sportmatch_clubs`): sigue pendiente la decisión de roles y
       migraciones con el equipo. Hasta entonces el sitio no funciona contra tus bases; solo contra servicios en memoria.
 - [ ] Poner el origen del sitio en `CORS_ALLOWED_ORIGINS` del Gateway (`http://localhost:3000` en desarrollo; el dominio real en producción).
-- [ ] Dentro del sitio faltan: planes y pago con Webpay (HU-40), el retorno del pago a una página del sitio, y el chat.
+- [ ] Dentro del sitio falta integrar el chat.
 - [ ] Logo por enlace `https`: falta el almacenamiento de archivos para subirlo desde el sitio (ver 2.8 de DUDAS).
 - [ ] La sesión dura 30 minutos y no se renueva sola; al vencer vuelve al inicio de sesión. Evaluar un token de renovación.
 - [ ] El token vive en `sessionStorage` (legible por scripts de la página). Si se quiere más seguridad, pasar a una cookie `httpOnly`
@@ -517,15 +426,15 @@ gateway**, que todavía no reenvía WebSockets.
 
 ## 15. Integración con el resto del backend
 
-- [x] `Ms_gateway`: rutas hacia `/api/v1/clubs`, `/api/v1/payments` y `/api/v1/chats`, `CLUBS_SERVICE_URL`
+- [x] `Ms_gateway`: rutas hacia `/api/v1/clubs` y `/api/v1/chats`, `CLUBS_SERVICE_URL`
       (en `.env.example`), reenvío de `Authorization` y de la redirección `3xx`. Públicas: directorio, perfil,
-      deportes, sección de convocatorias y su detalle, planes y el retorno de Webpay; el resto exige token. Esto no
+      deportes, sección de convocatorias y su detalle; el resto exige token. Esto no
       depende de `AUTH_REQUIRED`, que solo valida la configuración de la clave. 124 tests del gateway pasan
       (54 nuevos); romper a propósito 9 reglas de las rutas hizo fallar los tests las 9 veces.
 - [x] `Ms_gateway/compose.yaml`: servicio `ms_club` bajo el perfil `clubs` (`docker compose --profile clubs up`), que **no**
       es dependencia del gateway (si no arranca, el resto de la app sigue). Variables nuevas en `.env`: `CLUBS_SERVICE_URL=http://ms_club:8004`,
-      `CLUBS_DB_PASSWORD`, `WEBPAY_PUBLIC_URL`, `WEBPAY_FRONTEND_RETURN_URL` (página del sitio web) y, para adjuntos del chat,
-      `CHAT_ATTACHMENT_HOSTS`. Antes hay que crear la base y el rol (`ms-club/db/00_create_database.sql`) y aplicar las migraciones 001 a 006.
+      `CLUBS_DB_PASSWORD` y, para adjuntos del chat,
+      `CHAT_ATTACHMENT_HOSTS`. Antes hay que crear la base y el rol (`ms-club/db/00_create_database.sql`) y aplicar las migraciones disponibles de clubes en orden.
       Validado con `docker compose config` (sin imágenes construidas ni contenedores levantados).
 - [x] **Worker de notificaciones**: lee también `clubs_api.notification_outbox` si se define `CLUBS_DATABASE_URL` (rol `sportmatch_clubs`).
       Probado contra PostgreSQL real (llega a la bandeja de la persona correcta y un reintento no duplica).
@@ -533,8 +442,6 @@ gateway**, que todavía no reenvía WebSockets.
       `notification_outbox`, que sí existe en el Ms_Matching real). No es de este cambio; confirma que lo reemplace la versión real.
 - [x] **Proxy de WebSocket**: `wss://…/api/v1/chats/ws` se reenvía (22 tests con un Matching falso; 6 reglas rotas a propósito,
       detectadas). Probado con gateway y ms-machine reales (7/7: sitio web, app sin Origin, origen ajeno, token vencido). Falta reconstruir la imagen del gateway (nueva dependencia `websockets`).
-- [ ] **Ms-club es para el sitio web** (nota de producto): `WEBPAY_FRONTEND_RETURN_URL` debe ser una página del sitio
-      (no `sportmatchapp://pago`), y el origen del sitio debe estar en `CORS_ALLOWED_ORIGINS` del gateway. El chat es para app y web.
 - [ ] **Pruebas del gateway en esta máquina**: faltaban `pydantic-settings` y `cryptography` en el Python global,
       así que los tests del gateway no corrían (8 errores al recolectar). Se probó en un entorno virtual aparte con
       las versiones de `requirements.txt`; instalar esas dependencias para correrlos. 9 tests de notificaciones
@@ -543,78 +450,9 @@ gateway**, que todavía no reenvía WebSockets.
 - [ ] Frontend: pantallas de directorio, perfil, panel del club, convocatorias y
       postulaciones (la app aún no tiene roles de club).
 
-## 16. Fuera de las HU-30/31/32/33/34/38/40/49/50/51/52 (para siguientes historias)
+## 16. Fuera de las HU-30/31/32/33/34/38/49/50/51/52 (para siguientes historias)
 
 - `interesado_club`: existe en la base y el servicio no la usa.
-- `membresia` y `pago`: según `Ms_Users/db/README.md` pertenecen a este servicio. La HU-40
-  creó `transaccion_pago` y `suscripcion` como reemplazo propio; las `membresia`/`pago`
-  de la base `sportmatch_users` siguen sin tocar (ver la sección 9).
-
-## 17. Gestión de planes y convenios (HU-56)
-
-Informe completo: `docs/informes/2026-11-02-HU-56-planes-y-convenios.md`. Los planes, suscripciones y pagos viven
-**solo en esta base** (`plan_suscripcion`, `suscripcion`, `transaccion_pago`); las tablas `plan`/`membresia`/`pago`
-de los diagramas de Ms_Users no existen en la base `sportmach_users`.
-
-Decisiones por confirmar (cada una es fácil de cambiar):
-
-| Decisión | Motivo | Dónde cambiarla |
-|---|---|---|
-| "Convenio" = un plan con `categoria = CONVENIO` (se compra igual que un plan; `tipo` sigue siendo quién lo compra). El concepto no existía en el modelo. | Lo más simple y sin romper la lógica de compra por tipo | `012_gestion_planes.sql`, `schemas/pago.py` (`PlanCategoria`) |
-| El precio es un entero en pesos (sin decimales), de 0 a 10.000.000. 0 = gratuito y no se paga con Webpay (409). | CLP no tiene decimales y Webpay cobra montos enteros; `transaccion_pago.amount` exige > 0 | `schemas/plan_admin.py` (`PRECIO_MAX`), `pago_service.initiate` |
-| Duración de 1 a 366 días (el tope que ya tenía la tabla). | Coherente con la tabla | `schemas/plan_admin.py`, `012` |
-| Errores de validación = 400 (no 422), como el resto de este servicio, y sin repetir el valor enviado. | Convención de ms-club | `main.py` (`invalid_request`) |
-| Un plan desactivado no se edita. **Sí se puede reactivar** (`POST /api/v1/payments/admin/plans/{id}/reactivate`, desde 2026-11-02): solo si está desactivado y su nombre sigue libre entre los activos (si no, 409). Queda en la auditoría como `PLAN_REACTIVATED`. | El panel web ya mostraba "Reactivar" | `plan_admin_service.py`, `postgres_club_repository.reactivate_plan` |
-| No hay renovación automática en ningún servicio: una suscripción solo se extiende con un pago nuevo, y un plan desactivado no se puede contratar (404), así que no se renueva. | El campo `renovacion_automatica` de los diagramas no existe | `pago_service.initiate` |
-| Un pago ya iniciado antes de desactivar el plan se acepta al confirmarse (el dinero ya se cobró). | No cobrar sin entregar el servicio | `pago_service._confirm` |
-| El nombre es único entre planes activos, sin distinguir mayúsculas ni espacios; se reemplazó `UNIQUE (tipo, nombre)`. | Pedido de la HU | `012` (`plan_suscripcion_nombre_activo_uq`) |
-| El tipo y la categoría de un plan no se editan. | Cambiar quién lo compra rompería suscripciones existentes | `PlanUpdate` |
-| La auditoría se escribe en Ms_Users por su endpoint interno **dentro** de la transacción del cambio, antes de confirmar. Si falla, 503 y nada se guarda. Si la auditoría se escribe y el `COMMIT` falla después, queda una fila de auditoría sin cambio (el lado seguro). | El cambio y la auditoría están en bases distintas | `plan_audit.py`, repositorios |
-
-Pendientes:
-
-- [ ] **Desplegar con el secreto**: `INTERNAL_SERVICE_TOKEN` (mínimo 32 bytes, el mismo que Ms_Users) ahora debe estar en ms-club
-      (`compose.yaml` ya lo pasa). Sin él, crear, editar y desactivar planes responde 503.
-- [ ] Aplicar `db/migrations/012_gestion_planes.sql` como `postgres` en cada ambiente (la aplica `clubs_migrate` en Docker).
-      El rol `sportmatch_clubs` queda con INSERT y UPDATE sobre `plan_suscripcion`, nunca DELETE.
-- [ ] El seed `db/seeds/demo_planes.sql` ya no usa `ON CONFLICT (tipo, nombre)` (esa restricción desaparece con la 012).
-- [x] Web (`sportmatch-web`): la pantalla de planes y convenios del panel está conectada a esta API (`lib/api/ofertas.ts`,
-      `lib/api/planesAdmin.ts`), con el diseño original. Recorrido real en Chrome: `scripts/e2e-admin.cjs`.
-- [x] App (`Frontend-SportMatch-APP`): conserva su diseño original (planes Gratuito, Pro y Club y su tabla comparativa) y toma por
-      debajo el precio, la duración, la descripción y los beneficios de `/payments/plans`. Los convenios y otros planes extra del
-      backend **no se muestran** en la app: el diseño no tiene dónde (decisión del equipo de diseño). Un plan desactivado no llega de
-      la API. Pendiente de comprobar en un teléfono o emulador: el aspecto y el pago real con Webpay.
-- [ ] Una cuenta con rol `admin` es la única autorizada; no hay roles intermedios (por ejemplo, un "gestor de planes").
-- [ ] `docs/webpay/README.md` dice que el panel web `/planes` usa `lib/planes.mock.ts`; ese archivo ya no existe.
-
-### Institución de un convenio y panel web (2026-11-02)
-
-- [x] `db/migrations/013_plan_institucion.sql`: columna opcional `plan_suscripcion.institucion` (hasta 80 caracteres, solo para
-      `categoria = CONVENIO`, con CHECK). La API la acepta en crear y editar (`null` la borra), la muestra el catálogo público y la
-      auditoría registra su cambio solo por nombre de campo (`campos`), nunca el texto libre. Aplicar como `postgres` en cada ambiente.
-- [x] Institución: la web la muestra y la edita en convenios. La app de deportistas y clubes **no tiene** el campo (su diseño no lo trae).
-
-### Lo que faltaba para el diseño del panel web (2026-11-02)
-
-- [x] `POST /api/v1/payments/admin/plans/{id}/reactivate`: solo si está desactivado; el nombre debe seguir libre entre los planes
-      activos (409 con el motivo); auditoría `PLAN_REACTIVATED` en la misma operación (503 y no se guarda si falla). Requiere que
-      Ms_Users tenga la acción nueva en `AuditAction` (ya agregada): reconstruir `ms_users` junto con `ms_club`.
-- [x] `GET /api/v1/payments/admin/plans/{id}/subscriptions?estado=vigente|vencida|todas&pagina&limit` (máximo 100): nombre corto
-      de la persona o nombre del club, estado, nombre del plan y precio al contratar, inicio y término. Nunca correo ni RUT. Los
-      nombres de deportistas los pide ms-club a Ms_Users por la red interna (`POST /internal/v1/accounts/names`, con
-      `INTERNAL_SERVICE_TOKEN`); si Ms_Users no responde, la lista sale igual con el nombre vacío (la web dice "Cuenta eliminada").
-- [x] `db/migrations/014_plan_base_desactivacion.sql` (idempotente; aplicar como `postgres`): `es_base`, `fecha_desactivacion`,
-      `motivo_desactivacion` y `duracion_dias` NULL (= sin vencimiento, solo si `precio = 0`; un pago exige precio > 0, así que
-      transacciones y suscripciones siempre tienen duración).
-- [ ] **Decidir qué plan es el plan base.** La columna existe y el backend impide desactivar el plan base, pero ningún plan está
-      marcado (la migración no adivina). Para marcarlo: `UPDATE plan_suscripcion SET es_base = true WHERE id = <id>` (uno por
-      tipo). Hoy "Gratuito" de la app es un plan local sin fila en esta base. **Se deja pendiente a propósito (2026-11-02):** hoy el
-      backend solo impide desactivar el plan base; faltan por definir cuál es, cómo se marca desde el panel (hoy solo por SQL) y
-      qué otros límites tiene (editarlo, cambiarle precio o duración, crearlo).
-- [ ] La web carga las suscripciones plan por plan (hasta 5 páginas de 100 por plan). Con muchos planes o muchas suscripciones
-      conviene una ruta que las entregue todas juntas y paginadas.
-- [ ] La acción `PLAN_REACTIVATED` no está en la lista de etiquetas de la app (`services/auditoria.ts`) si el equipo vuelve a
-      mostrar la auditoría allí.
 
 ## 18. Reportes y moderación: actor, nota y autor del contenido (HU-47, panel web)
 
