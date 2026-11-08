@@ -65,9 +65,9 @@ def pool_for(dsn: str, schema: str) -> ConnectionPool:
     return pool
 
 
-def test_the_chain_covers_every_migration_and_014_is_the_last():
-    assert MIGRATIONS[-1].name == "014_plan_base_desactivacion.sql"
-    assert [path.name[:3] for path in MIGRATIONS] == [f"{n:03d}" for n in range(1, 15)]
+def test_the_chain_covers_every_migration_and_015_is_the_last():
+    assert MIGRATIONS[-1].name == "015_convocatoria_historial.sql"
+    assert [path.name[:3] for path in MIGRATIONS] == [f"{n:03d}" for n in range(1, 16)]
 
 
 def test_all_migrations_in_order_on_an_empty_base_and_again_leave_the_expected_schema(base):

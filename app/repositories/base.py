@@ -387,6 +387,23 @@ DecisionInactividadResult = Literal["eliminado", "mantenido", "sin_aviso", "sin_
 ApplyResult = Literal["creada", "no_encontrada", "no_abierta", "duplicada", "sin_cupos"]
 # Outcome of a review. sin_cambios: same estado (the comment may still change).
 ReviewResult = Literal["actualizada", "sin_cambios", "sin_cupos"]
+# Outcome of editing a convocatoria (HU-68). Every check runs under the row lock, atomically with the update.
+#   cupos_bajo_aceptados: the new cupos are fewer than the athletes already ACEPTADO.
+UpdateConvocatoriaResult = Literal[
+    "actualizada", "sin_cambios", "no_encontrada", "cerrada", "finalizada", "cupos_bajo_aceptados", "rango_edad",
+]
+
+
+@dataclass
+class ConvocatoriaUpdateOutcome:
+    result: UpdateConvocatoriaResult
+    convocatoria: StoredConvocatoria | None = None
+    # Athletes ACEPTADO when the edit was refused for cupos (for the message).
+    aceptados: int = 0
+    # How many applicants got the notice of this edit.
+    avisados: int = 0
+    # False when the edit was saved but its notice could not be written (logged).
+    aviso_registrado: bool = True
 
 
 class ClubRepository(Protocol):
@@ -613,6 +630,23 @@ class ClubRepository(Protocol):
 
     def close_convocatoria(self, convocatoria_id: UUID) -> StoredConvocatoria:
         """Mark it closed now; a convocatoria already closed keeps its date."""
+        ...
+
+    def update_convocatoria(
+        self,
+        club_id: UUID,
+        convocatoria_id: UUID,
+        changes: dict[str, Any],
+        *,
+        actor_id: UUID,
+        aviso: Callable[[StoredConvocatoria, dict[str, tuple[Any, Any]]], OutboxMessage | None],
+    ) -> ConvocatoriaUpdateOutcome:
+        """HU-68. In ONE transaction: lock the convocatoria row (the same lock accepting or applying takes, so an
+        acceptance and a cupos reduction never interleave), check it is ABIERTA and that the cupos are not below the
+        ACEPTADO count, apply the changes, write the history row (who, what, when) and, if `aviso` returns a notice
+        for the important fields that changed, one outbox row per applicant who is not RECHAZADO. The notice is
+        written in a savepoint: if it fails the edit is kept and the failure is logged. A convocatoria of another
+        club is no_encontrada. `changes` that equal the stored values change nothing (sin_cambios)."""
         ...
 
     def set_chat_postulantes(

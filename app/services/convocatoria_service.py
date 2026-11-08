@@ -13,8 +13,10 @@ from app.schemas.convocatoria import (
     ConvocatoriaFilters,
     ConvocatoriaPage,
     ConvocatoriaRead,
+    ConvocatoriaUpdate,
 )
 from app.services.authorization import require_managed_club
+from app.services.convocatoria_cambios import build_aviso
 
 
 class ConvocatoriaService:
@@ -57,6 +59,47 @@ class ConvocatoriaService:
             )
         convocatoria = self._repository.create_convocatoria(club.id, payload.insert_values())
         return to_convocatoria_read(convocatoria)
+
+    def update(
+        self, actor: Actor, club_id: UUID, convocatoria_id: UUID, payload: ConvocatoriaUpdate
+    ) -> ConvocatoriaRead:
+        """HU-68. Same shape as editing an activity (HU-24): only the fields sent change, a convocatoria of
+        another club of the same account is 404, and cupos cannot go below the athletes already accepted."""
+        club = require_managed_club(self._repository, actor, club_id)
+        if not club.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El club está inactivo: no puede editar convocatorias.",
+            )
+        changes = payload.changes()
+        if "deporte_id" in changes:
+            if self._repository.get_sport(changes["deporte_id"]) is None:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Deporte inexistente o inactivo.")
+            if all(sport.id != changes["deporte_id"] for sport in club.deportes):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="El club no ofrece ese deporte: agrégalo a sus deportes antes de publicar.",
+                )
+        outcome = self._repository.update_convocatoria(
+            club.id, convocatoria_id, changes, actor_id=actor.id, aviso=build_aviso
+        )
+        if outcome.result == "no_encontrada":
+            raise _convocatoria_not_found()
+        if outcome.result == "cerrada":
+            raise HTTPException(status.HTTP_409_CONFLICT, "La convocatoria está cerrada; no se puede editar.")
+        if outcome.result == "finalizada":
+            raise HTTPException(status.HTTP_409_CONFLICT, "La convocatoria ya finalizó; no se puede editar.")
+        if outcome.result == "cupos_bajo_aceptados":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"Ya hay {outcome.aceptados} postulantes aceptados; los cupos no pueden ser menos.",
+            )
+        if outcome.result == "rango_edad":
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "edad_minima no puede superar a edad_maxima."
+            )
+        assert outcome.convocatoria is not None
+        return to_convocatoria_read(outcome.convocatoria)
 
     def close(self, actor: Actor, club_id: UUID, convocatoria_id: UUID) -> ConvocatoriaRead:
         club = require_managed_club(self._repository, actor, club_id)
