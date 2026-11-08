@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+import logging
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,7 @@ from app.repositories.base import (
     CrearCanalResult,
     DecisionInactividadResult,
     HiloEliminado,
+    ConvocatoriaUpdateOutcome,
     OutboxEvent,
     OutboxMessage,
     ReviewResult,
@@ -74,6 +76,9 @@ class MockClubRepository:
         self._postulaciones: dict[UUID, dict[str, Any]] = {}
         # Events the Ms_gateway worker would read from clubs_api.notification_outbox.
         self.outbox: list[OutboxEvent] = []
+        # HU-68: convocatoria_historial rows, and a switch for tests to make the notice fail.
+        self.historial: list[dict[str, Any]] = []
+        self.fail_outbox = False
         self._last_tick: datetime | None = None
         self._planes: dict[int, StoredPlan] = {plan.id: plan for plan in planes or []}
         self._transacciones: dict[UUID, StoredTransaccion] = {}
@@ -895,6 +900,70 @@ class MockClubRepository:
         assert convocatoria is not None
         return convocatoria
 
+    def update_convocatoria(
+        self,
+        club_id: UUID,
+        convocatoria_id: UUID,
+        changes: dict[str, Any],
+        *,
+        actor_id: UUID,
+        aviso: Callable[[StoredConvocatoria, dict[str, tuple[Any, Any]]], OutboxMessage | None],
+    ) -> ConvocatoriaUpdateOutcome:
+        from app.services.convocatoria_cambios import diff, history_entry
+
+        row = self._convocatorias.get(convocatoria_id)
+        if row is None or row["club_id"] != club_id:
+            return ConvocatoriaUpdateOutcome("no_encontrada")
+        current = self.get_convocatoria(convocatoria_id, include_inactive_clubs=True)
+        assert current is not None
+        if current.estado == "FINALIZADA":
+            return ConvocatoriaUpdateOutcome("finalizada", current)
+        if current.estado == "CERRADA":
+            return ConvocatoriaUpdateOutcome("cerrada", current)
+        low = changes.get("edad_minima", current.edad_minima)
+        high = changes.get("edad_maxima", current.edad_maxima)
+        if low is not None and high is not None and low > high:
+            return ConvocatoriaUpdateOutcome("rango_edad", current)
+        cambios = diff(current, changes)
+        if "cupos" in changes:
+            aceptados = sum(
+                1 for p in self._postulaciones.values()
+                if p["convocatoria_id"] == convocatoria_id and p["estado"] == "ACEPTADO"
+            )
+            if changes["cupos"] < aceptados:
+                return ConvocatoriaUpdateOutcome("cupos_bajo_aceptados", current, aceptados)
+        if not cambios:
+            return ConvocatoriaUpdateOutcome("sin_cambios", current)
+        for column in cambios:
+            row[column] = changes[column]
+        mensaje = aviso(current, cambios)
+        avisados, registrado = 0, True
+        if mensaje is not None:
+            try:
+                if self.fail_outbox:
+                    raise RuntimeError("outbox unavailable")
+                destinatarios = sorted(
+                    {p["usuario_id"] for p in self._postulaciones.values()
+                     if p["convocatoria_id"] == convocatoria_id and p["estado"] != "RECHAZADO"},
+                    key=str,
+                )
+                for usuario_id in destinatarios:
+                    self.outbox.append(OutboxEvent(
+                        user_id=usuario_id, kind=mensaje.kind, title=mensaje.title, body=mensaje.body,
+                        data=dict(mensaje.data),
+                    ))
+                avisados = len(destinatarios)
+            except Exception:
+                logging.getLogger(__name__).error(
+                    "convocatoria %s edited but its notice could not be written", convocatoria_id)
+                registrado = False
+        self.historial.append({
+            "convocatoria_id": convocatoria_id, "usuario_id": actor_id, "fecha": self._tick(),
+            "cambios": history_entry(cambios), "avisados": avisados,
+        })
+        updated = self.get_convocatoria(convocatoria_id, include_inactive_clubs=True)
+        return ConvocatoriaUpdateOutcome("actualizada", updated, 0, avisados, registrado)
+
     def set_chat_postulantes(
         self, club_id: UUID, convocatoria_id: UUID, habilitado: bool
     ) -> StoredConvocatoria | None:
@@ -1016,6 +1085,13 @@ class MockClubRepository:
                 if p["convocatoria_id"] == row["convocatoria_id"] and p["estado"] != "RECHAZADO"
             )
             if taken >= convocatoria["cupos"]:
+                return "sin_cupos", self._stored_postulacion(row)
+        if estado == "ACEPTADO" and anterior != "ACEPTADO":
+            accepted = sum(
+                1 for p in self._postulaciones.values()
+                if p["convocatoria_id"] == row["convocatoria_id"] and p["estado"] == "ACEPTADO"
+            )
+            if accepted >= self._convocatorias[row["convocatoria_id"]]["cupos"]:
                 return "sin_cupos", self._stored_postulacion(row)
         row["estado"] = estado
         if set_comentario:

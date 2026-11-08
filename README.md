@@ -97,6 +97,7 @@ tests/                    pruebas de la API con el repositorio mock
 | GET | `/api/v1/clubs/announcements` | Público | Sección de convocatorias (por defecto, abiertas). |
 | GET | `/api/v1/clubs/announcements/{id}` | Público | Detalle de una convocatoria. |
 | POST | `/api/v1/clubs/{id}/announcements` | admin del club | Publica una convocatoria del club. |
+| PATCH | `/api/v1/clubs/{id}/announcements/{convocatoria_id}` | admin del club | Edita una convocatoria publicada (HU-68). |
 | POST | `/api/v1/clubs/{id}/announcements/{convocatoria_id}/close` | admin del club | Cierra una convocatoria antes de su fecha. |
 | POST | `/api/v1/clubs/announcements/{convocatoria_id}/applications` | Deportista | Postula a una convocatoria abierta. |
 | GET | `/api/v1/clubs/announcements/applications/me` | Deportista | Historial y estado de mis postulaciones. |
@@ -220,6 +221,42 @@ Errores propios: `400` fecha pasada, sin zona horaria o lejana, cupos ≤ 0,
 faltan campos obligatorios, deporte inexistente o que el club no ofrece; `401`
 sin token; `403` sin rol `club_admin` o club ajeno; `404` club o convocatoria
 inexistente; `409` club inactivo o convocatoria finalizada.
+
+### Editar una convocatoria (HU-68)
+
+`PATCH /api/v1/clubs/{club_id}/announcements/{convocatoria_id}`, igual que editar una actividad (HU-24): solo cambia lo
+que se envía. `null` borra `edad_minima`, `edad_maxima`, `comuna`, `titulo` y `descripcion`; los demás campos no aceptan
+`null`. Se puede cambiar todo lo que se puede publicar (`deporte_id`, `categoria_edad`, edades, `fecha_prueba`,
+`requisitos`, `cupos`, `direccion`, `comuna`, `titulo`, `descripcion`, `chat_postulantes_habilitado`) con las mismas reglas
+(fecha futura y a menos de un año, rangos, deporte que el club ofrece). `estado`, `club_id`, `cerrada_en`, `cupos_disponibles`
+y cualquier campo desconocido se rechazan (400).
+
+| Caso | Respuesta |
+|---|---|
+| Sin sesión | 401 |
+| Deportista, o administrador de otro club por la ruta de este | 403 |
+| Convocatoria que no es del club de la ruta (o no existe) | 404, el mismo texto: no revela si existe |
+| Datos inválidos, sin ningún campo, fecha pasada, edades al revés | 400 |
+| Convocatoria **cerrada** o **finalizada** | 409: no se edita (decisión: igual que HU-24 con una actividad cancelada o ya comenzada) |
+| `cupos` menor que los postulantes `ACEPTADO` | 409 «Ya hay N postulantes aceptados; los cupos no pueden ser menos.» (igual a N sí se permite) |
+| Club inactivo | 409 |
+
+- **Concurrencia:** la edición bloquea la fila de la convocatoria (`FOR UPDATE`), el mismo bloqueo que toman postular y
+  revisar. Aceptar a un postulante y bajar los cupos se ejecutan uno tras otro, y como ahora los cupos pueden quedar bajo
+  el total de postulaciones, **aceptar** también verifica que los aceptados no superen los cupos (409 con el mismo mensaje
+  de «sin cupos» de la revisión). Hay prueba con 12 rondas en PostgreSQL y 6 en vivo.
+- **Aviso a los postulantes:** si cambia algo **importante** (`fecha_prueba`, lugar —`direccion` o `comuna`—, `requisitos` o
+  `deporte_id`) se escribe **un** aviso por postulante que no esté `RECHAZADO` (incluye a los aceptados), sin importar cuántos
+  de esos campos cambien juntos. Título, descripción, cupos, edades, categoría y el interruptor del chat son detalles
+  menores: no avisan. Va por `clubs_api.notification_outbox` (tipo `convocatoria`, `data.cambios` con `fecha`, `lugar`,
+  `requisitos` o `deporte`) y lo lleva el worker del gateway a la bandeja y al push, como los avisos de la HU-34.
+- **Sin duplicados:** lo que se compara es el valor guardado; repetir la misma petición, o enviar un valor que ya está
+  (también la misma hora con otro desfase horario), no cambia nada, no avisa y no deja historial.
+- **Si falla el aviso:** se escribe en un savepoint; si falla, la edición se guarda igual, se responde 200, se registra el
+  error en el log (`... edited but its notice could not be written`) y el historial queda con `avisados = 0`.
+- **Historial:** la migración `015_convocatoria_historial.sql` crea `convocatoria_historial` (quién editó, cuándo, qué
+  cambió como `{"campo": {"antes", "despues"}}` y a cuántos se avisó), escrito en la misma transacción. La edición de
+  actividades (HU-24) no guarda historial; este es el único.
 
 ## Postulaciones (HU-33)
 

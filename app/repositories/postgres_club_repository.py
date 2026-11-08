@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import logging
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
@@ -21,6 +22,7 @@ from app.repositories.base import (
     CanalInactividad,
     ClaimResult,
     ClubSport,
+    ConvocatoriaUpdateOutcome,
     CreateClubResult,
     CrearCanalResult,
     DecisionInactividadResult,
@@ -295,6 +297,8 @@ _ACCESO_HILO_CLUB = f"""
                   AND {_postulante_activo('hh.club_id', 'hh.deportista_id')}) AS acceso_hilo
 """
 _HILO_POSTULANTE = _postulante_activo("h.club_id", "h.deportista_id")
+
+logger = logging.getLogger(__name__)
 
 _CONVOCATORIA_COLUMNS = frozenset({
     "deporte_id", "titulo", "descripcion", "categoria_edad", "edad_minima", "edad_maxima",
@@ -1441,6 +1445,86 @@ class PostgresClubRepository:
         assert convocatoria is not None
         return convocatoria
 
+    def update_convocatoria(
+        self,
+        club_id: UUID,
+        convocatoria_id: UUID,
+        changes: dict[str, Any],
+        *,
+        actor_id: UUID,
+        aviso: Callable[[StoredConvocatoria, dict[str, tuple[Any, Any]]], OutboxMessage | None],
+    ) -> ConvocatoriaUpdateOutcome:
+        from app.services.convocatoria_cambios import diff, history_entry
+
+        unknown = set(changes) - _CONVOCATORIA_COLUMNS
+        if unknown:
+            raise ValueError(f"Columns not writable: {sorted(unknown)}")
+        with self._pool.connection() as conn, conn.transaction():
+            # The lock review_postulacion and create_postulacion take first: acceptances wait for this edit and
+            # this edit waits for them, so the ACEPTADO count read below is the one the edit commits against.
+            locked = conn.execute(
+                "SELECT club_id FROM convocatoria WHERE id = %s FOR UPDATE", (convocatoria_id,),
+            ).fetchone()
+            if locked is None or locked[0] != club_id:
+                return ConvocatoriaUpdateOutcome("no_encontrada")
+            current = self.get_convocatoria(convocatoria_id, include_inactive_clubs=True)
+            assert current is not None
+            if current.estado == "FINALIZADA":
+                return ConvocatoriaUpdateOutcome("finalizada", current)
+            if current.estado == "CERRADA":
+                return ConvocatoriaUpdateOutcome("cerrada", current)
+            low = changes.get("edad_minima", current.edad_minima)
+            high = changes.get("edad_maxima", current.edad_maxima)
+            if low is not None and high is not None and low > high:
+                return ConvocatoriaUpdateOutcome("rango_edad", current)
+            cambios = diff(current, changes)
+            if "cupos" in changes:
+                aceptados = conn.execute(
+                    "SELECT count(*) FROM postulacion_convocatoria "
+                    "WHERE convocatoria_id = %s AND estado = 'ACEPTADO'", (convocatoria_id,),
+                ).fetchone()[0]
+                if changes["cupos"] < aceptados:
+                    return ConvocatoriaUpdateOutcome("cupos_bajo_aceptados", current, aceptados)
+            if not cambios:
+                return ConvocatoriaUpdateOutcome("sin_cambios", current)
+            columns = list(cambios)
+            conn.execute(
+                sql.SQL("UPDATE convocatoria SET {}, fecha_actualizacion = now() WHERE id = %(id)s").format(
+                    sql.SQL(", ").join(
+                        sql.SQL("{} = {}").format(sql.Identifier(column), sql.Placeholder(column))
+                        for column in columns
+                    )
+                ),
+                {**{column: changes[column] for column in columns}, "id": convocatoria_id},
+            )
+            historial_id = conn.execute(
+                "INSERT INTO convocatoria_historial (convocatoria_id, usuario_id, cambios, avisados) "
+                "VALUES (%s, %s, %s, 0) RETURNING id",
+                (convocatoria_id, actor_id, Jsonb(history_entry(cambios))),
+            ).fetchone()[0]
+            avisados, registrado = 0, True
+            mensaje = aviso(current, cambios)
+            if mensaje is not None:
+                try:
+                    # A savepoint: if the notice cannot be written the edit is still saved.
+                    with conn.transaction():
+                        avisados = conn.execute(
+                            sql.SQL(
+                                "INSERT INTO {} (user_id, kind, title, body, data) "
+                                "SELECT p.usuario_id, %s, %s, %s, %s FROM postulacion_convocatoria p "
+                                "WHERE p.convocatoria_id = %s AND p.estado <> 'RECHAZADO' ORDER BY p.usuario_id"
+                            ).format(_OUTBOX),
+                            (mensaje.kind, mensaje.title, mensaje.body, Jsonb(mensaje.data), convocatoria_id),
+                        ).rowcount
+                        conn.execute("UPDATE convocatoria_historial SET avisados = %s WHERE id = %s",
+                                     (avisados, historial_id))
+                except Exception:
+                    logger.error("convocatoria %s edited but its notice could not be written",
+                                 convocatoria_id, exc_info=True)
+                    avisados, registrado = 0, False
+        updated = self.get_convocatoria(convocatoria_id, include_inactive_clubs=True)
+        return ConvocatoriaUpdateOutcome("actualizada", updated, 0, avisados, registrado)
+
     def set_chat_postulantes(
         self, club_id: UUID, convocatoria_id: UUID, habilitado: bool
     ) -> StoredConvocatoria | None:
@@ -1637,6 +1721,14 @@ class PostgresClubRepository:
                     (convocatoria_id,),
                 ).fetchone()[0]
                 sin_cupos = taken >= cupos
+            if estado == "ACEPTADO" and anterior != "ACEPTADO":
+                # HU-68: cupos can now be lowered (never below the accepted ones), so accepting one more must keep
+                # accepted <= cupos. The convocatoria lock above makes this race-free against the edit.
+                accepted = conn.execute(
+                    "SELECT count(*) FROM postulacion_convocatoria WHERE convocatoria_id = %s AND estado = 'ACEPTADO'",
+                    (convocatoria_id,),
+                ).fetchone()[0]
+                sin_cupos = sin_cupos or accepted >= cupos
             result: ReviewResult
             if sin_cupos:
                 result = "sin_cupos"

@@ -12,6 +12,7 @@ from app.schemas.convocatoria import (
     ConvocatoriaFilters,
     ConvocatoriaPage,
     ConvocatoriaRead,
+    ConvocatoriaUpdate,
 )
 from app.services.convocatoria_service import ConvocatoriaService
 
@@ -63,6 +64,25 @@ def publish_convocatoria(
     service: ConvocatoriaService = Depends(get_convocatoria_service),
 ) -> ConvocatoriaRead:
     return service.publish(actor, club_id, payload)
+
+
+@router.patch(
+    "/{club_id}/announcements/{convocatoria_id}",
+    response_model=ConvocatoriaRead,
+    summary="Editar una convocatoria del club (HU-68)",
+    description="Solo un administrador del club dueño. Se cambia solo lo que se envía, con las reglas de la "
+    "publicación (fecha futura, rangos, deporte del club); `null` borra edades, comuna, título o descripción. "
+    "409 si está cerrada o finalizada, o si los cupos quedan por debajo de los deportistas aceptados. Si cambian la "
+    "fecha, el lugar, los requisitos o el deporte, los postulantes que no están rechazados reciben un aviso.",
+)
+def update_convocatoria(
+    club_id: UUID,
+    convocatoria_id: UUID,
+    payload: ConvocatoriaUpdate,
+    actor: Actor = Depends(get_club_admin),
+    service: ConvocatoriaService = Depends(get_convocatoria_service),
+) -> ConvocatoriaRead:
+    return service.update(actor, club_id, convocatoria_id, payload)
 
 
 @router.post(

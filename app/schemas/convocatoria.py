@@ -18,6 +18,15 @@ EDAD_MAX = 99
 Requisito = Annotated[str, StringConstraints(strip_whitespace=True, min_length=2, max_length=200)]
 
 
+def check_fecha_prueba(value: datetime) -> datetime:
+    now = datetime.now(timezone.utc)
+    if value <= now:
+        raise ValueError("La fecha de la prueba debe ser futura.")
+    if value > now + timedelta(days=FECHA_PRUEBA_MAX_DIAS):
+        raise ValueError(f"La fecha de la prueba no puede ser a más de {FECHA_PRUEBA_MAX_DIAS} días.")
+    return value
+
+
 class ConvocatoriaCreate(APIModel):
     """Tryout announcement published by a club (HU-32)."""
 
@@ -48,14 +57,7 @@ class ConvocatoriaCreate(APIModel):
     @field_validator("fecha_prueba")
     @classmethod
     def fecha_futura(cls, value: datetime) -> datetime:
-        now = datetime.now(timezone.utc)
-        if value <= now:
-            raise ValueError("La fecha de la prueba debe ser futura.")
-        if value > now + timedelta(days=FECHA_PRUEBA_MAX_DIAS):
-            raise ValueError(
-                f"La fecha de la prueba no puede ser a más de {FECHA_PRUEBA_MAX_DIAS} días."
-            )
-        return value
+        return check_fecha_prueba(value)
 
     @model_validator(mode="after")
     def rango_de_edad(self) -> ConvocatoriaCreate:
@@ -70,6 +72,57 @@ class ConvocatoriaCreate(APIModel):
     def insert_values(self) -> dict[str, Any]:
         """Column values to insert; fields left out keep the table defaults."""
         return self.model_dump(exclude_none=True)
+
+
+class ConvocatoriaUpdate(APIModel):
+    """HU-68: edit a published convocatoria. Only the fields sent change; they are the ones that can be created,
+    with the same rules. `null` clears the optional ones (edades, comuna, titulo, descripcion)."""
+
+    deporte_id: int | None = Field(default=None, ge=1)
+    categoria_edad: str | None = Field(default=None, min_length=2, max_length=40)
+    edad_minima: int | None = Field(default=None, ge=EDAD_MIN, le=EDAD_MAX)
+    edad_maxima: int | None = Field(default=None, ge=EDAD_MIN, le=EDAD_MAX)
+    fecha_prueba: AwareDatetime | None = None
+    requisitos: list[Requisito] | None = Field(default=None, min_length=1, max_length=15)
+    cupos: int | None = Field(default=None, ge=1, le=1000)
+    direccion: str | None = Field(default=None, min_length=5, max_length=255)
+    comuna: str | None = Field(default=None, min_length=2, max_length=80, pattern=PLACE_PATTERN)
+    titulo: str | None = Field(default=None, min_length=3, max_length=120)
+    descripcion: str | None = Field(default=None, max_length=2000)
+    chat_postulantes_habilitado: bool | None = None
+
+    @field_validator("comuna", "titulo", "descripcion", mode="before")
+    @classmethod
+    def optional_text(cls, value: object) -> object:
+        return blank_is_none(value)
+
+    @field_validator("fecha_prueba")
+    @classmethod
+    def fecha_futura(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else check_fecha_prueba(value)
+
+    @model_validator(mode="after")
+    def requires_changes(self) -> ConvocatoriaUpdate:
+        if not self.model_fields_set:
+            raise ValueError("Indica al menos un dato para modificar.")
+        for field in self.model_fields_set - NULLABLE_UPDATE_FIELDS:
+            if getattr(self, field) is None:
+                raise ValueError(f"{field} no puede ser nulo.")
+        if (
+            self.edad_minima is not None
+            and self.edad_maxima is not None
+            and self.edad_minima > self.edad_maxima
+        ):
+            raise ValueError("edad_minima no puede superar a edad_maxima.")
+        return self
+
+    def changes(self) -> dict[str, Any]:
+        """Only what the request sent (an explicit null included)."""
+        return self.model_dump(include=self.model_fields_set)
+
+
+# Optional in the table: sending null removes the value.
+NULLABLE_UPDATE_FIELDS = frozenset({"edad_minima", "edad_maxima", "comuna", "titulo", "descripcion"})
 
 
 class ConvocatoriaChatUpdate(APIModel):

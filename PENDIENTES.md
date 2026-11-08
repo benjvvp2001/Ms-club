@@ -642,3 +642,26 @@ Código en `Ms_Users` (con endpoints internos en `Ms_activities` y `ms-machine`)
 - [ ] Las notas ya guardadas antes de esta migración no existen (quedan vacías); los reportes resueltos antes sí muestran quién
       los resolvió porque `revisado_por` ya se guardaba.
 
+## 19. Editar una convocatoria (HU-68)
+
+- [x] `PATCH /api/v1/clubs/{club_id}/announcements/{convocatoria_id}` (ver el README): solo el club dueño, mismas validaciones
+      que al publicar, campos desconocidos o no editables rechazados, cupos nunca por debajo de los aceptados (con bloqueo de
+      fila), cerrada o finalizada no se edita (409).
+- [x] Aviso único a los postulantes no rechazados cuando cambian fecha, lugar, requisitos o deporte; nada si el cambio es menor.
+- [x] `db/migrations/015_convocatoria_historial.sql` (idempotente; aplicar como `postgres`; `app.database.migrate` aplica
+      todos los `*.sql` en orden): historial de ediciones.
+- [x] Aceptar a un postulante verifica que los aceptados no superen los cupos (necesario porque ahora los cupos se pueden bajar).
+- [ ] **A confirmar con el equipo:** qué cuenta como «importante». Hoy: fecha, lugar (dirección o comuna), requisitos y deporte.
+      Categoría, edades y cupos no avisan.
+- [ ] **A confirmar:** una convocatoria **cerrada** no se puede editar (para corregirla hay que publicar otra). No existe el
+      estado «cancelada» en esta tabla. Si el club quiere reabrir una cerrada, hoy no hay endpoint.
+- [ ] Los cupos se pueden bajar hasta el número de **aceptados**, aunque haya más postulaciones pendientes o preseleccionadas:
+      esas siguen en la lista, `cupos_disponibles` queda en 0 y no se pueden aceptar más de los cupos. El club decide a quién
+      rechazar; no se rechaza a nadie solo. Si se prefiere exigir que los cupos cubran también a los pendientes, es un cambio
+      de una línea.
+- [ ] La copia del perfil que cada postulación guarda al postular no cambia con esta HU.
+- [ ] No hay endpoint para **leer** el historial de ediciones (solo se guarda). Pendiente si el panel lo necesita.
+- [ ] Ni la app ni la web tienen todavía el botón «Editar convocatoria»: la capa de datos está lista
+      (`editarConvocatoria` en `services/convocatorias.ts` de la app y en `lib/api/convocatorias.ts` de la web); falta la
+      pantalla, que no se creó para no cambiar el diseño.
+- [ ] **Desplegar:** reconstruir `ms_club` y `gateway` juntos (la ruta nueva está en el gateway); `clubs_migrate` aplica la 015.
