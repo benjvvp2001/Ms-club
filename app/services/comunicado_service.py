@@ -17,6 +17,7 @@ from app.schemas.comunicado import (
 )
 from app.schemas.convocatoria import ClubRef
 from app.services.authorization import require_managed_club
+from app.services.entitlements_client import EntitlementsClient, enforce
 
 # The alert may show on a locked screen: only a short preview goes in the push;
 # the full text is read in the app.
@@ -26,8 +27,10 @@ _PREVIEW_MAX = 120
 class ComunicadoService:
     """Notices from clubs to their athletes (HU-38)."""
 
-    def __init__(self, repository: ClubRepository) -> None:
+    def __init__(self, repository: ClubRepository, entitlements: EntitlementsClient | None = None) -> None:
         self._repository = repository
+        # HU-54: plan limits read from ms-pago; None = no limits (fail-open).
+        self._entitlements = entitlements
 
     def publish(self, actor: Actor, club_id: UUID, payload: ComunicadoCreate) -> ComunicadoClubRead:
         club = require_managed_club(self._repository, actor, club_id)
@@ -36,6 +39,8 @@ class ComunicadoService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="El club está inactivo: no puede publicar comunicados.",
             )
+        enforce(self._entitlements, "club", club.id, "comunicados",
+                lambda desde: self._repository.fechas_comunicados_desde(club.id, desde))
         comunicado_id = uuid4()
         comunicado = self._repository.create_comunicado(
             club.id,

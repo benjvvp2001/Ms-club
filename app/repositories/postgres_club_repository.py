@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
@@ -258,8 +258,11 @@ class PostgresClubRepository:
 
     # -- directory ----------------------------------------------------------
 
-    def search_clubs(self, filters: ClubFilters) -> tuple[list[StoredClub], int]:
+    def search_clubs(
+        self, filters: ClubFilters, destacados: Collection[UUID] = ()
+    ) -> tuple[list[StoredClub], int]:
         params: dict[str, Any] = {
+            "destacados": list(destacados),
             "nombre": _contains(filters.nombre),
             "zona": _contains(filters.zona),
             "deporte_id": filters.deporte_id,
@@ -277,7 +280,7 @@ class PostgresClubRepository:
                 SELECT {_CLUB_COLUMNS}
                 FROM club c
                 WHERE {_SEARCH_CONDITIONS}
-                ORDER BY lower(c.nombre), c.id
+                ORDER BY c.id = ANY(%(destacados)s::uuid[]) DESC, lower(c.nombre), c.id
                 LIMIT %(limit)s OFFSET %(offset)s
                 """,
                 params,
@@ -1740,6 +1743,33 @@ class PostgresClubRepository:
                 )
         comunicados = self._load_comunicados(f"{_COMUNICADO_SELECT} WHERE c.id = %s", (comunicado_id,))
         return comunicados[0]
+
+    # -- HU-54: plan limits (rolling windows over the existing tables) ------------------
+
+    def fechas_comunicados_desde(self, club_id: UUID, desde: datetime) -> list[datetime]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT fecha_creacion FROM comunicado_club WHERE club_id = %s AND fecha_creacion > %s "
+                "ORDER BY fecha_creacion",
+                (club_id, desde),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def fechas_postulaciones_desde(self, usuario_id: UUID, desde: datetime) -> list[datetime]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT fecha_creacion FROM postulacion_convocatoria WHERE usuario_id = %s "
+                "AND fecha_creacion > %s ORDER BY fecha_creacion",
+                (usuario_id, desde),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def ya_postulo(self, convocatoria_id: UUID, usuario_id: UUID) -> bool:
+        with self._pool.connection() as conn:
+            return conn.execute(
+                "SELECT 1 FROM postulacion_convocatoria WHERE convocatoria_id = %s AND usuario_id = %s",
+                (convocatoria_id, usuario_id),
+            ).fetchone() is not None
 
     def list_comunicados_club(
         self, club_id: UUID, filters: ClubComunicadoFilters

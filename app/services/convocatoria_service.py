@@ -17,13 +17,16 @@ from app.schemas.convocatoria import (
 )
 from app.services.authorization import require_managed_club
 from app.services.convocatoria_cambios import build_aviso
+from app.services.entitlements_client import EntitlementsClient, enforce
 
 
 class ConvocatoriaService:
     """Tryout announcements of clubs (HU-32)."""
 
-    def __init__(self, repository: ClubRepository) -> None:
+    def __init__(self, repository: ClubRepository, entitlements: EntitlementsClient | None = None) -> None:
         self._repository = repository
+        # HU-54: plan limits read from ms-pago; None = no limits (fail-open).
+        self._entitlements = entitlements
 
     def list_convocatorias(self, filters: ConvocatoriaFilters) -> ConvocatoriaPage:
         convocatorias, total = self._repository.search_convocatorias(filters)
@@ -57,6 +60,9 @@ class ConvocatoriaService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="El club no ofrece ese deporte: agrégalo a sus deportes antes de publicar.",
             )
+        enforce(self._entitlements, "club", club.id, "convocatorias_abiertas",
+                lambda _: self._repository.search_convocatorias(
+                    ConvocatoriaFilters(club_id=club.id, estado="ABIERTA", page_size=1))[1])
         convocatoria = self._repository.create_convocatoria(club.id, payload.insert_values())
         return to_convocatoria_read(convocatoria)
 

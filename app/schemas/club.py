@@ -152,6 +152,8 @@ class ClubSummary(APIModel):
     comuna: str | None
     verificado: bool
     deportes: list[Deporte]
+    # HU-54: the club has a paid plan in force (ms-pago); false when it cannot be known.
+    es_destacado: bool = False
 
 
 class ClubPage(APIModel):

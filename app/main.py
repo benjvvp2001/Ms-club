@@ -27,6 +27,8 @@ from app.database.session import check_connection, create_pool
 from app.repositories.base import ClubRepository
 from app.repositories.postgres_club_repository import PostgresClubRepository
 from app.services import canal_inactividad
+from app.services.entitlements_client import (EntitlementsClient, LimitePlanError, limite_plan_handler,
+                                              settings_from_env)
 from app.services.users_client import AthleteProfiles, UsersClient
 
 
@@ -40,6 +42,7 @@ def create_app(
     repository: ClubRepository | None = None,
     users: AthleteProfiles | None = None,
     inactividad: bool | None = None,
+    entitlements: EntitlementsClient | None = None,
 ) -> FastAPI:
     """Create the service without routes outside the approved clubs prefix.
 
@@ -76,6 +79,13 @@ def create_app(
                 trust_env=False,
             )
             app.state.users = UsersClient(http_client)
+        own_entitlements = None
+        if entitlements is None and owns_pool:
+            # HU-54: limits from ms-pago; without PAYMENTS_SERVICE_URL nothing is limited (fail-open).
+            entitlement_settings = settings_from_env()
+            if entitlement_settings is not None:
+                own_entitlements = EntitlementsClient(entitlement_settings)
+                app.state.entitlements = own_entitlements
         worker = None
         run_worker = (
             inactividad if inactividad is not None else owns_pool and canal_inactividad.enabled()
@@ -90,6 +100,8 @@ def create_app(
                 worker.stop()
             if http_client is not None:
                 http_client.close()
+            if own_entitlements is not None:
+                own_entitlements.close()
             pool = pool_holder.get("pool")
             if pool is not None:
                 pool.close()  # type: ignore[attr-defined]
@@ -105,6 +117,10 @@ def create_app(
         app.state.repository = repository
     if users is not None:
         app.state.users = users
+    if entitlements is not None:
+        app.state.entitlements = entitlements
+    # HU-54: plan limit reached -> 402 {codigo: "LIMITE_PLAN", limite, usado, se_libera_en}.
+    app.add_exception_handler(LimitePlanError, limite_plan_handler)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, error: RequestValidationError) -> JSONResponse:

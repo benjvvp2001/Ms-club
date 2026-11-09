@@ -22,6 +22,7 @@ from app.schemas.postulacion import (
 from app.services.authorization import require_managed_club
 from app.services.convocatoria_service import to_convocatoria_read
 from app.services.users_client import AthleteProfiles
+from app.services.entitlements_client import EntitlementsClient, enforce
 
 # Inbox/push text per new estado. The club's comment is not included: alerts can
 # show on a locked screen, so the detail stays inside the app.
@@ -41,9 +42,12 @@ _CONFLICTS = {
 class PostulacionService:
     """Athletes' applications to convocatorias (HU-33)."""
 
-    def __init__(self, repository: ClubRepository, users: AthleteProfiles) -> None:
+    def __init__(self, repository: ClubRepository, users: AthleteProfiles,
+                 entitlements: EntitlementsClient | None = None) -> None:
         self._repository = repository
         self._users = users
+        # HU-54: plan limits read from ms-pago; None = no limits (fail-open).
+        self._entitlements = entitlements
 
     def apply(
         self, actor: Actor, convocatoria_id: UUID, payload: PostulacionCreate
@@ -59,6 +63,12 @@ class PostulacionService:
 
         perfil = self._users.athlete_profile(actor)
         _check_age(convocatoria, perfil)
+        if self._entitlements is not None:
+            # A repeated application is a 409 (duplicada), never a 402: it would not use a new slot.
+            if self._repository.ya_postulo(convocatoria.id, actor.id):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_CONFLICTS["duplicada"])
+            enforce(self._entitlements, "usuario", actor.id, "postulaciones_convocatorias",
+                    lambda desde: self._repository.fechas_postulaciones_desde(actor.id, desde))
 
         # Open state, duplicates and cupos are checked again atomically with the insert.
         result, postulacion = self._repository.create_postulacion(
