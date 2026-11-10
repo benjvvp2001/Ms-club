@@ -386,7 +386,8 @@ DecisionInactividadResult = Literal["eliminado", "mantenido", "sin_aviso", "sin_
 # Outcome of an application; every check runs atomically with the insert.
 ApplyResult = Literal["creada", "no_encontrada", "no_abierta", "duplicada", "sin_cupos"]
 # Outcome of a review. sin_cambios: same estado (the comment may still change).
-ReviewResult = Literal["actualizada", "sin_cambios", "sin_cupos"]
+#   ya_aceptada (HU-67): PRESELECCIONADO was asked for someone already ACEPTADO; nothing changes.
+ReviewResult = Literal["actualizada", "sin_cambios", "sin_cupos", "ya_aceptada"]
 # Outcome of editing a convocatoria (HU-68). Every check runs under the row lock, atomically with the update.
 #   cupos_bajo_aceptados: the new cupos are fewer than the athletes already ACEPTADO.
 UpdateConvocatoriaResult = Literal[

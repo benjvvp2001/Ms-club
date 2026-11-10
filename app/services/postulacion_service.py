@@ -117,6 +117,11 @@ class PostulacionService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="La convocatoria no tiene cupos para volver a considerar esta postulación.",
             )
+        if result == "ya_aceptada":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Esta postulación ya fue aceptada; no se puede preseleccionar.",
+            )
         return to_candidato_read(actualizada)
 
     def set_chat_postulantes(

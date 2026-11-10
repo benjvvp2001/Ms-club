@@ -318,6 +318,13 @@ confirma después de la prueba.
   `null` lo borra. Responde `200` con el candidato.
   Pasar desde `RECHAZADO` a otro estado vuelve a ocupar un cupo: `409` si no hay.
   `404` si la postulación no existe.
+  **Quien ya está `ACEPTADO` no se puede pasar a `PRESELECCIONADO` (HU-67):** `409`
+  «Esta postulación ya fue aceptada; no se puede preseleccionar.», sin cambiar el estado, el comentario, los cupos ni
+  los avisos. La comprobación se hace con la convocatoria y la postulación bloqueadas (`FOR UPDATE`), el mismo orden de
+  bloqueos de postular, revisar y editar, así que es segura si se acepta y se preselecciona a la vez. Las demás
+  transiciones no cambian (por ejemplo `ACEPTADO` a `PENDIENTE` o a `RECHAZADO` siguen permitidas; para preseleccionar a
+  alguien aceptado primero hay que dejarlo `PENDIENTE`). Preseleccionar a un preseleccionado sigue siendo `200` sin aviso.
+  La app y la web del club ya no muestran el botón «Preseleccionar» a un postulante aceptado.
 
 ### Aviso al deportista
 
