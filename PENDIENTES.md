@@ -665,3 +665,32 @@ Código en `Ms_Users` (con endpoints internos en `Ms_activities` y `ms-machine`)
       (`editarConvocatoria` en `services/convocatorias.ts` de la app y en `lib/api/convocatorias.ts` de la web); falta la
       pantalla, que no se creó para no cambiar el diseño.
 - [ ] **Desplegar:** reconstruir `ms_club` y `gateway` juntos (la ruta nueva está en el gateway); `clubs_migrate` aplica la 015.
+
+## 20. Ver y desbloquear usuarios bloqueados (HU-66, vive en Ms_Users)
+
+- [x] Lista paginada (`limit` 1–100, `offset`) de las personas que bloqueé, con id, nombre, inicial del apellido, foto y fecha;
+      desbloqueo idempotente. Sin migración nueva. Ver el README de Ms_Users.
+- [x] La capa de datos de la app (`listarBloqueados`, `cargarBloqueados` por páginas y `desbloquear`) está lista.
+- [ ] **Falta la pantalla.** Ni la app ni la web tienen una pantalla de configuración con la lista de bloqueados, la
+      foto y el nombre, ni el diálogo «¿Desbloquear?». Hoy solo se puede desbloquear desde el chat o el perfil de la
+      persona (que ya tienen su aviso de confirmación). Pendiente de diseño; no se creó para no cambiar el diseño.
+- [ ] **A confirmar:** `/blocks/check` (lo usan los otros servicios) le dice `{"blocked": true}` a la persona bloqueada si
+      lo consulta con su token. Es la regla de la HU-59; si se quiere que no pueda deducir el bloqueo, hay que cambiar
+      cómo lo consultan ms-machine y Ms_activities, no solo este endpoint.
+- [ ] **A confirmar:** una cuenta eliminada no aparece en la lista (decisión). Si se prefiere mostrarla con un nombre genérico
+      hace falta un texto que hoy no existe en las pantallas.
+- [ ] **Desplegar:** reconstruir `ms_users` y `gateway`.
+
+## 21. Ocultar la preselección de un postulante aceptado (HU-67)
+
+- [x] `PATCH /clubs/announcements/applications/{id}` responde `409` si se pide `PRESELECCIONADO` para quien ya está
+      `ACEPTADO` (bajo `FOR UPDATE`, sin cambios ni avisos). Sin migración. Ver el README.
+- [x] La app y la web del club no muestran «Preseleccionar» cuando el postulante está aceptado (`puedePreseleccionar` en
+      `services/convocatorias.ts` de la app y `decisionDisponible` en `lib/datos-mapeo.mjs` de la web, usada por la tarjeta y por
+      el perfil del postulante).
+- [ ] **A confirmar:** el texto del `409` es nuevo (el sistema no tenía uno para esta transición); no se ve en ninguna pantalla
+      porque el botón ya no existe.
+- [ ] **A confirmar:** `ACEPTADO` a `PENDIENTE` («En espera») y a `RECHAZADO` siguen permitidos, como pide la HU («el resto
+      del flujo queda igual»). Si se quiere impedir devolver a un aceptado a «En espera», es una regla aparte.
+- [ ] La web ofrece «En espera» como estado propio (`EN_ESPERA`); el backend solo conoce `PENDIENTE`. No se tocó.
+- [ ] **Desplegar:** reconstruir `ms_club` (el gateway no cambió).

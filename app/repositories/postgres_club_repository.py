@@ -1712,6 +1712,9 @@ class PostgresClubRepository:
                 (postulacion_id,),
             ).fetchone()
             sin_cupos = False
+            # HU-67: an accepted athlete cannot be preselected. Decided here, with both rows locked, so it holds even
+            # if the same athlete is being accepted or preselected by another request at the same moment.
+            ya_aceptada = estado == "PRESELECCIONADO" and anterior == "ACEPTADO"
             if anterior == "RECHAZADO" and estado != "RECHAZADO":
                 taken = conn.execute(
                     """
@@ -1730,7 +1733,9 @@ class PostgresClubRepository:
                 ).fetchone()[0]
                 sin_cupos = sin_cupos or accepted >= cupos
             result: ReviewResult
-            if sin_cupos:
+            if ya_aceptada:
+                result = "ya_aceptada"
+            elif sin_cupos:
                 result = "sin_cupos"
             else:
                 conn.execute(
