@@ -7,7 +7,7 @@ import threading
 from psycopg import sql
 
 from test_editar_convocatoria_postgres import Pg, pg  # noqa: F401  (pg: fixture)
-from test_planes_admin_postgres import base  # noqa: F401  (base: fixture)
+from pg_support import base  # noqa: F401  (base: fixture)
 
 REFUSED = "Esta postulación ya fue aceptada; no se puede preseleccionar."
 

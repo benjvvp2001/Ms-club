@@ -62,9 +62,10 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 - `comunicado_destinatario` (migración 005): los deportistas que recibieron cada
   comunicado (`usuario_id` es la cuenta de Ms_Users, sin FK). Se llena al publicar y
   alimenta la bandeja del deportista.
+- **Sin uso (los pagos y planes viven en Ms-pago).** Las tres tablas siguientes se conservan en la base, con sus datos, y este servicio ya no las lee ni las escribe:
 - `plan_suscripcion` (migración 006): catálogo de planes (`tipo` `USUARIO` o `CLUB`,
-  `precio` en pesos enteros, `duracion_dias`). El servicio solo lo lee; los planes y
-  precios reales los define SportMatch (`seeds/demo_planes.sql` trae dos de PRUEBA).
+  `precio` en pesos enteros, `duracion_dias`). Era de este servicio; los planes y
+  precios reales los define SportMatch en Ms-pago (`seeds/demo_planes.sql` trae dos de PRUEBA y ya no se usa).
 - `transaccion_pago` (006): un intento de pago, desde que se crea la transacción en
   Webpay (`PENDING`) hasta `APPROVED`, `REJECTED` o `CANCELLED`. Comprador: `usuario_id`
   (cuenta de Ms_Users, sin FK) o `club_id`, exactamente uno. `iniciada_por` es la cuenta
@@ -89,8 +90,8 @@ pertenecen a `postgres`; el servicio se conecta con el rol `sportmatch_clubs`.
 | `convocatoria` | SELECT, INSERT, UPDATE | 002 (UPDATE también permite el `FOR UPDATE` al postular) |
 | `postulacion_convocatoria` | SELECT, INSERT, UPDATE | 003 |
 | `comunicado_club`, `comunicado_destinatario` | SELECT, INSERT (no se editan ni borran) | 005 |
-| `plan_suscripcion` | SELECT | 006 |
-| `transaccion_pago`, `suscripcion` | SELECT, INSERT, UPDATE (nunca se borran) | 006 |
+| `plan_suscripcion` | SELECT (sin uso) | 006 |
+| `transaccion_pago`, `suscripcion` | SELECT, INSERT, UPDATE (sin uso; nunca se borran) | 006 |
 | `clubs_api.notification_outbox` | USAGE del esquema; SELECT, INSERT, UPDATE, DELETE | 004 (el servicio inserta; el worker del gateway, con este mismo rol, lee, marca y purga) |
 | `club_administrador` | SELECT, INSERT, DELETE (quitar o salir) | 007 |
 | `club_admin_asignacion` | SELECT, INSERT, UPDATE (marcar aceptada o revocada; nunca se borra) | 009 |
@@ -122,8 +123,7 @@ En pgAdmin, conectado a `sportmatch_clubs` como `postgres`, una vez y en orden:
 6. `db/migrations/005_comunicados.sql`: crea las dos tablas de comunicados y da
    permisos al rol. Mismas garantías; requiere la 004 (usa su outbox).
 7. `db/migrations/006_pagos.sql`: planes, transacciones de pago y suscripciones. Mismas
-   garantías. Después, solo en desarrollo, `db/seeds/demo_planes.sql` (como `postgres`)
-   para tener dos planes de prueba.
+   garantías. Quedan sin uso desde que los pagos pasaron a Ms-pago; `db/seeds/demo_planes.sql` tampoco se usa.
 8. `db/migrations/007_club_rut_administradores.sql`: `club.rut` y `club_administrador`
    (con los dueños actuales como `PRINCIPAL`). Mismas garantías. Ya no crea
    `club_invitacion_admin`. Sin ella fallan todas las rutas de administración (la
