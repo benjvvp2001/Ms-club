@@ -128,3 +128,14 @@ En pgAdmin, conectado a `sportmatch_clubs` como `postgres`, una vez y en orden:
 
 `python -m app.database.migrate` aplica las migraciones con el usuario de `DB_*`;
 con el rol del servicio solo sirve para comprobar que ya están aplicadas.
+
+
+## Integraci?n de ramas del 2026-11-11
+
+Los pagos, planes, suscripciones y Webpay se atienden en `ms-pago`, por las rutas
+`/api/v1/payments`. Clubes consulta ese servicio para l?mites y destacados mediante
+`PAYMENTS_SERVICE_URL`, `PAYMENTS_TIMEOUT_SECONDS`, `ENTITLEMENTS_CACHE_SECONDS` e
+`INTERNAL_SERVICE_TOKEN`. Se conserva la cadena completa de migraciones 001 a 015,
+incluidas 006 y 012 a 014: son hist?ricas e idempotentes y no deben desaparecer
+al trasladar una funcionalidad. Las tablas antiguas de pagos de Clubes quedan sin uso;
+no se reactivan rutas de pagos ni se cargan planes de prueba desde este servicio.

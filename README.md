@@ -502,3 +502,14 @@ python -m pytest
 Puerto 8004 (users 8001, matching 8002, activities 8003). El gateway publica `/api/v1/clubs/*` y configura `CLUBS_SERVICE_URL` para este servicio.
 
 Lo que falta por hacer está en [PENDIENTES.md](PENDIENTES.md).
+
+
+## Integraci?n de ramas del 2026-11-11
+
+Los pagos, planes, suscripciones y Webpay se atienden en `ms-pago`, por las rutas
+`/api/v1/payments`. Clubes consulta ese servicio para l?mites y destacados mediante
+`PAYMENTS_SERVICE_URL`, `PAYMENTS_TIMEOUT_SECONDS`, `ENTITLEMENTS_CACHE_SECONDS` e
+`INTERNAL_SERVICE_TOKEN`. Se conserva la cadena completa de migraciones 001 a 015,
+incluidas 006 y 012 a 014: son hist?ricas e idempotentes y no deben desaparecer
+al trasladar una funcionalidad. Las tablas antiguas de pagos de Clubes quedan sin uso;
+no se reactivan rutas de pagos ni se cargan planes de prueba desde este servicio.
