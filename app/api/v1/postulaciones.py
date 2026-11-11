@@ -82,7 +82,8 @@ def list_candidatos(
     description="Solo un administrador del club. Estados: PENDIENTE (en espera), "
     "PRESELECCIONADO, ACEPTADO o RECHAZADO, con comentario opcional para el deportista. Si el "
     "estado cambia a PRESELECCIONADO, ACEPTADO o RECHAZADO, se avisa al deportista (bandeja y "
-    "push vía Ms_gateway); PENDIENTE no avisa. Repetir el mismo estado no genera aviso.",
+    "push vía Ms_gateway); PENDIENTE no avisa. Repetir el mismo estado no genera aviso. Quien ya está "
+    "ACEPTADO no se puede preseleccionar (409, sin cambios); las demás transiciones siguen igual.",
 )
 def review_candidato(
     postulacion_id: UUID,

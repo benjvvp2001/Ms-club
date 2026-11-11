@@ -1068,6 +1068,8 @@ class MockClubRepository:
     ) -> tuple[ReviewResult, StoredPostulacion]:
         row = self._postulaciones[postulacion_id]
         anterior = row["estado"]
+        if estado == "PRESELECCIONADO" and anterior == "ACEPTADO":  # HU-67
+            return "ya_aceptada", self._stored_postulacion(row)
         if anterior == "RECHAZADO" and estado != "RECHAZADO":
             convocatoria = self._convocatorias[row["convocatoria_id"]]
             taken = sum(
