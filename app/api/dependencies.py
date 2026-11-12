@@ -6,6 +6,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.core.config import get_club_max_admins
 from app.core.security import Actor, authenticate
 from app.repositories.base import ClubRepository
+from app.services.account_photos import AccountPhotos
 from app.services.administrador_service import AdministradorService
 from app.services.canal_service import CanalService
 from app.services.club_service import ClubService
@@ -69,11 +70,17 @@ def get_users(request: Request) -> AthleteProfiles:
     return request.app.state.users
 
 
+def get_photos(request: Request) -> AccountPhotos | None:
+    """Ms_Users' current photos. Optional: without it the candidates simply have no photo."""
+    return getattr(request.app.state, "photos", None)
+
+
 def get_postulacion_service(
     repository: ClubRepository = Depends(get_repository),
     users: AthleteProfiles = Depends(get_users),
+    photos: AccountPhotos | None = Depends(get_photos),
 ) -> PostulacionService:
-    return PostulacionService(repository, users)
+    return PostulacionService(repository, users, photos)
 
 
 def get_current_actor(

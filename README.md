@@ -299,7 +299,7 @@ confirma después de la prueba.
 
 - `GET /api/v1/clubs/announcements/{convocatoria_id}/applications`: la
   convocatoria y sus candidatos, el más antiguo primero, con `usuario_id`,
-  `estado`, `perfil_deportivo` (copia adjunta al postular), `mensaje`,
+  `estado`, `perfil_deportivo` (copia adjunta al postular, salvo `foto_perfil`: siempre la foto vigente, ver abajo), `mensaje`,
   `antecedentes`, `comentario_club` y `fecha_postulacion`. Filtro opcional
   `estado`, `page`, `page_size`, y `conteo_por_estado` de toda la convocatoria.
 - `PATCH /api/v1/clubs/announcements/applications/{postulacion_id}` con
@@ -317,6 +317,16 @@ confirma después de la prueba.
   transiciones no cambian (por ejemplo `ACEPTADO` a `PENDIENTE` o a `RECHAZADO` siguen permitidas; para preseleccionar a
   alguien aceptado primero hay que dejarlo `PENDIENTE`). Preseleccionar a un preseleccionado sigue siendo `200` sin aviso.
   La app y la web del club ya no muestran el botón «Preseleccionar» a un postulante aceptado.
+
+**Foto del candidato.** La copia guardada al postular no se muestra: su archivo se borra cuando la persona cambia o quita su
+foto, y el club veía una imagen rota. Al listar candidatos (y al responder un cambio de estado) ms-club pide a Ms_Users, **en
+una sola consulta por página**, las fotos vigentes (`POST /internal/v1/accounts/photos`, solo red interna con
+`X-Internal-Service-Token`; el gateway no la expone). Quien quitó su foto aparece sin foto, y si Ms_Users no responde la lista
+sale igual con `foto_perfil: null`. Solo viaja la ruta de la foto, nada más de la persona.
+
+**Textos y números de las peticiones.** Un carácter NUL (U+0000) en cualquier texto de un cuerpo da `400` (PostgreSQL no lo
+guarda y antes respondía `500`); y `true`/`false` ya no se lee como 1/0 en `cupos`, `deporte_id` ni las edades. Los números
+como `5.0` o `"7"` se siguen aceptando.
 
 ### Aviso al deportista
 

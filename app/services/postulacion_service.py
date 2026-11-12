@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from fastapi import HTTPException, status
 
 from app.core.security import Actor
+from app.services.account_photos import AccountPhotos
 from app.repositories.base import ClubRepository, OutboxEvent, StoredConvocatoria, StoredPostulacion
 from app.schemas.convocatoria import ConvocatoriaRead
 from app.schemas.postulacion import (
@@ -22,6 +24,8 @@ from app.schemas.postulacion import (
 from app.services.authorization import require_managed_club
 from app.services.convocatoria_service import to_convocatoria_read
 from app.services.users_client import AthleteProfiles
+
+_logger = logging.getLogger(__name__)
 
 # Inbox/push text per new estado. The club's comment is not included: alerts can
 # show on a locked screen, so the detail stays inside the app.
@@ -41,9 +45,27 @@ _CONFLICTS = {
 class PostulacionService:
     """Athletes' applications to convocatorias (HU-33)."""
 
-    def __init__(self, repository: ClubRepository, users: AthleteProfiles) -> None:
+    def __init__(
+        self, repository: ClubRepository, users: AthleteProfiles, photos: AccountPhotos | None = None
+    ) -> None:
         self._repository = repository
         self._users = users
+        self._photos = photos
+
+    def _with_current_photos(self, candidatos: list[CandidatoRead]) -> list[CandidatoRead]:
+        """The club always sees the photo the athlete has NOW, not the copy saved when they applied (that file is
+        deleted when the photo is replaced or removed). One request to Ms_Users for the whole list; if it cannot
+        answer, the list still goes out, without photos."""
+        fotos: dict[UUID, str] = {}
+        if self._photos is not None and candidatos:
+            try:
+                fotos = self._photos.photos([c.usuario_id for c in candidatos])
+            except Exception as error:  # noqa: BLE001 - the photo is a convenience; it never blocks the list
+                _logger.warning("Candidate photos unavailable (%s); listing without them", type(error).__name__)
+        return [
+            c.model_copy(update={"perfil_deportivo": c.perfil_deportivo.model_copy(update={"foto_perfil": fotos.get(c.usuario_id)})})
+            for c in candidatos
+        ]
 
     def apply(
         self, actor: Actor, convocatoria_id: UUID, payload: PostulacionCreate
@@ -88,7 +110,7 @@ class PostulacionService:
         candidatos, total, conteo = self._repository.list_candidatos(convocatoria.id, filters)
         return CandidatoPage(
             convocatoria=to_convocatoria_read(convocatoria),
-            items=[to_candidato_read(c) for c in candidatos],
+            items=self._with_current_photos([to_candidato_read(c) for c in candidatos]),
             total=total,
             page=filters.page,
             page_size=filters.page_size,
@@ -122,7 +144,7 @@ class PostulacionService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Esta postulación ya fue aceptada; no se puede preseleccionar.",
             )
-        return to_candidato_read(actualizada)
+        return self._with_current_photos([to_candidato_read(actualizada)])[0]
 
     def set_chat_postulantes(
         self, actor: Actor, club_id: UUID, convocatoria_id: UUID, habilitado: bool

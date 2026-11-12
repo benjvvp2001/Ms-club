@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -27,6 +28,7 @@ from app.database.session import check_connection, create_pool
 from app.repositories.base import ClubRepository
 from app.repositories.postgres_club_repository import PostgresClubRepository
 from app.services import canal_inactividad
+from app.services.account_photos import AccountPhotos, InternalAccountPhotos
 from app.services.users_client import AthleteProfiles, UsersClient
 
 
@@ -40,6 +42,7 @@ def create_app(
     repository: ClubRepository | None = None,
     users: AthleteProfiles | None = None,
     inactividad: bool | None = None,
+    photos: AccountPhotos | None = None,
 ) -> FastAPI:
     """Create the service without routes outside the approved clubs prefix.
 
@@ -77,6 +80,9 @@ def create_app(
                 trust_env=False,
             )
             app.state.users = UsersClient(http_client)
+            if photos is None:
+                # Current photo of the candidates, from Ms_Users' internal endpoint (shared secret).
+                app.state.photos = InternalAccountPhotos(http_client, os.getenv("INTERNAL_SERVICE_TOKEN"))
         worker = None
         run_worker = (
             inactividad if inactividad is not None else owns_pool and canal_inactividad.enabled()
@@ -106,6 +112,8 @@ def create_app(
         app.state.repository = repository
     if users is not None:
         app.state.users = users
+    if photos is not None:
+        app.state.photos = photos
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(_: Request, error: RequestValidationError) -> JSONResponse:

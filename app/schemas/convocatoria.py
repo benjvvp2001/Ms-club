@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, Field, StringConstraints, field_validator, model_validator
 
-from app.schemas.common import PAGE_SIZE_MAX, PLACE_PATTERN, APIModel, Deporte, blank_is_none
+from app.schemas.common import PAGE_SIZE_MAX, PLACE_PATTERN, APIModel, Deporte, blank_is_none, reject_bool
 
 # ABIERTA: accepts applicants. CERRADA: closed by the club before the date.
 # FINALIZADA: the tryout date already passed. Computed when reading, never stored.
@@ -54,6 +54,11 @@ class ConvocatoriaCreate(APIModel):
     def optional_text(cls, value: object) -> object:
         return blank_is_none(value)
 
+    @field_validator("deporte_id", "edad_minima", "edad_maxima", "cupos", mode="before")
+    @classmethod
+    def not_a_boolean(cls, value: object) -> object:
+        return reject_bool(value)
+
     @field_validator("fecha_prueba")
     @classmethod
     def fecha_futura(cls, value: datetime) -> datetime:
@@ -95,6 +100,11 @@ class ConvocatoriaUpdate(APIModel):
     @classmethod
     def optional_text(cls, value: object) -> object:
         return blank_is_none(value)
+
+    @field_validator("deporte_id", "edad_minima", "edad_maxima", "cupos", mode="before")
+    @classmethod
+    def not_a_boolean(cls, value: object) -> object:
+        return reject_bool(value)
 
     @field_validator("fecha_prueba")
     @classmethod
