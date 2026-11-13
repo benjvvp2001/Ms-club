@@ -1,0 +1,2721 @@
+{
+  "info": {
+    "_postman_id": "4b7d2e90-5c1a-4f0e-8d33-sportmatch-club",
+    "name": "SportMatch - ms-club (clubes, convocatorias y canales)",
+    "description": "Rutas vigentes de ms-club por el gateway (/api/v1/clubs). Los pagos, planes y suscripciones viven en Ms-pago y no se incluyen. Cada carpeta encadena los ids con variables de entorno; correr en orden.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "00 - Cuentas (Ms_Users)",
+      "item": [
+        {
+          "name": "1. Registrar representante de club",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('club_admin_email', 'qa.club.' + Date.now() + '@example.com');",
+                  "pm.environment.set('player_email', 'qa.player.' + Date.now() + '@example.com');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('rol club_admin', () => pm.expect(pm.response.json().user.role).to.eql('club_admin'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{club_admin_email}}\",\n  \"password\": \"{{password}}\",\n  \"nombre\": \"Rosa\",\n  \"apellido_paterno\": \"Club\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/register-club",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "auth",
+                "register-club"
+              ]
+            }
+          }
+        },
+        {
+          "name": "2. Confirmar el correo del representante",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// El código llega por correo; en desarrollo ms_users lo imprime en consola (docker logs) y, con EMAIL_VERIFICATION_ACCEPT_ANY_CODE=true, sirve cualquiera de 6 dígitos.",
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.environment.set('club_admin_token', pm.response.json().access_token);",
+                  "pm.environment.set('club_admin_id', pm.response.json().user.user_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{club_admin_email}}\",\n  \"code\": \"{{verification_code}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/email-verification/confirm",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "auth",
+                "email-verification",
+                "confirm"
+              ]
+            }
+          }
+        },
+        {
+          "name": "3. Registrar deportista",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{player_email}}\",\n  \"password\": \"{{password}}\",\n  \"nombre\": \"Alicia\",\n  \"apellido_paterno\": \"Atleta\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/register",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "auth",
+                "register"
+              ]
+            }
+          }
+        },
+        {
+          "name": "4. Confirmar el correo del deportista",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.environment.set('player_token', pm.response.json().access_token);",
+                  "pm.environment.set('player_id', pm.response.json().user.user_id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{player_email}}\",\n  \"code\": \"{{verification_code}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/users/auth/email-verification/confirm",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                "auth",
+                "email-verification",
+                "confirm"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "01 - Club (HU-30, HU-31)",
+      "item": [
+        {
+          "name": "Crear mi club",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "function dv(n){let s=0,m=2;for(const d of String(n).split('').reverse()){s+=Number(d)*m;m=m===7?2:m+1;}const r=11-s%11;return r===11?'0':r===10?'K':String(r);}",
+                  "const n = 76000000 + Math.floor(Math.random()*3999999);",
+                  "pm.environment.set('club_rut', n + '-' + dv(n));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.expect([201]).to.include(pm.response.code));",
+                  "const b = pm.response.json(); const v = b.id || b.club_id;",
+                  "if (v) pm.environment.set('club_id', v);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Club Postman {{$timestamp}}\",\n  \"descripcion\": \"Club de prueba Postman\",\n  \"comuna\": \"Ñuñoa\",\n  \"deporte_ids\": [\n    1\n  ],\n  \"rut\": \"{{club_rut}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Mi club (panel)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "me"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Editar el perfil del club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"descripcion\": \"Descripción editada desde Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Directorio de clubes (público)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Catálogo de deportes (público)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/deportes",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "deportes"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Perfil público del club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Uso de mi plan - representante (HU-54)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));",
+                  "pm.test('items de límites', () => pm.expect(pm.response.json().items).to.be.an('array'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/plan-usage/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "plan-usage",
+                "me"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Uso de mi plan - deportista (HU-54)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/plan-usage/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "plan-usage",
+                "me"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Quitar un deporte del club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/409', () => pm.expect([200, 204, 409]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/deportes/1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "deportes",
+                "1"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Agregar un deporte al club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204', () => pm.expect([200, 204]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/deportes/1",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "deportes",
+                "1"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "02 - Convocatorias (HU-32, HU-68)",
+      "item": [
+        {
+          "name": "Publicar una convocatoria",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('fecha_prueba', new Date(Date.now()+20*24*3600*1000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.expect([201]).to.include(pm.response.code));",
+                  "const b = pm.response.json(); const v = b.id || b.convocatoria_id;",
+                  "if (v) pm.environment.set('convocatoria_id', v);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/announcements",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "announcements"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deporte_id\": 1,\n  \"categoria_edad\": \"Sub-17\",\n  \"edad_minima\": 15,\n  \"edad_maxima\": 17,\n  \"fecha_prueba\": \"{{fecha_prueba}}\",\n  \"requisitos\": [\n    \"Ficha médica\"\n  ],\n  \"cupos\": 10,\n  \"direccion\": \"Av. QA 123\",\n  \"titulo\": \"Convocatoria Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Listar convocatorias (público)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/announcements",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "announcements"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Detalle de una convocatoria",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/announcements/{{convocatoria_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "announcements",
+                "{{convocatoria_id}}"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Editar la convocatoria (HU-68)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/announcements/{{convocatoria_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "announcements",
+                "{{convocatoria_id}}"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"titulo\": \"Convocatoria editada\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Permitir chat a los postulantes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/400/422', () => pm.expect([200, 204, 400, 422]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/announcements/{{convocatoria_id}}/chat",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "announcements",
+                "{{convocatoria_id}}",
+                "chat"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"habilitado\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Publicar 3.ª convocatoria abierta sobre el plan Gratis (402 LIMITE_PLAN)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('fecha_prueba', new Date(Date.now()+20*24*3600*1000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/402', () => pm.expect([201, 402]).to.include(pm.response.code));",
+                  "if (pm.response.code === 402) pm.test('cuerpo LIMITE_PLAN', () => pm.expect(pm.response.json().codigo).to.eql('LIMITE_PLAN'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/announcements",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "announcements"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deporte_id\": 1,\n  \"categoria_edad\": \"Sub-17\",\n  \"edad_minima\": 15,\n  \"edad_maxima\": 17,\n  \"fecha_prueba\": \"{{fecha_prueba}}\",\n  \"requisitos\": [\n    \"Ficha médica\"\n  ],\n  \"cupos\": 10,\n  \"direccion\": \"Av. QA 123\",\n  \"titulo\": \"Convocatoria Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Cerrar la segunda convocatoria",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/409', () => pm.expect([200, 204, 409]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/announcements/{{convocatoria_id}}/close",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "announcements",
+                "{{convocatoria_id}}",
+                "close"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Publicar otra convocatoria (para postular)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.environment.set('fecha_prueba', new Date(Date.now()+20*24*3600*1000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/402', () => pm.expect([201, 402]).to.include(pm.response.code));",
+                  "const b = pm.response.json(); const v = b.id || b.convocatoria_id;",
+                  "if (v) pm.environment.set('convocatoria_id', v);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/announcements",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "announcements"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deporte_id\": 1,\n  \"categoria_edad\": \"Sub-17\",\n  \"edad_minima\": 15,\n  \"edad_maxima\": 17,\n  \"fecha_prueba\": \"{{fecha_prueba}}\",\n  \"requisitos\": [\n    \"Ficha médica\"\n  ],\n  \"cupos\": 10,\n  \"direccion\": \"Av. QA 123\",\n  \"titulo\": \"Convocatoria Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "03 - Postulaciones (HU-33, HU-34)",
+      "item": [
+        {
+          "name": "Postular (deportista)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/409/422/402/403', () => pm.expect([201, 409, 422, 402, 403]).to.include(pm.response.code));",
+                  "const b = pm.response.json(); const v = b.id;",
+                  "if (v) pm.environment.set('postulacion_id', v);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/announcements/{{convocatoria_id}}/applications",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "announcements",
+                "{{convocatoria_id}}",
+                "applications"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mensaje\": \"Quiero participar\",\n  \"antecedentes\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Mis postulaciones",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/announcements/applications/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "announcements",
+                "applications",
+                "me"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Candidatos de la convocatoria (club)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));",
+                  "const b = pm.response.json(); const first = (b.items || b)[0]; if (first && first.id) pm.environment.set('postulacion_id', first.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/announcements/{{convocatoria_id}}/applications",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "announcements",
+                "{{convocatoria_id}}",
+                "applications"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Cambiar el estado de un candidato (HU-34)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/404/409', () => pm.expect([200, 404, 409]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/announcements/applications/{{postulacion_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "announcements",
+                "applications",
+                "{{postulacion_id}}"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"estado\": \"PRESELECCIONADO\",\n  \"comentario\": \"Buen perfil\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "04 - Comunicados (HU-38)",
+      "item": [
+        {
+          "name": "Publicar un comunicado (HU-38)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/402', () => pm.expect([201, 402]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/notices",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "notices"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"titulo\": \"Aviso de prueba\",\n  \"contenido\": \"Entrenamiento este sábado\",\n  \"audiencia\": \"TODOS\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Comunicados del club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/notices",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "notices"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Mi bandeja de comunicados (deportista)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/notices/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "notices",
+                "me"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 - Administradores del club",
+      "item": [
+        {
+          "name": "Administradores del club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/admins",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "admins"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Correos asignados pendientes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/admins/assignments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "admins",
+                "assignments"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Asignar un correo como administrador",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/409/422', () => pm.expect([201, 409, 422]).to.include(pm.response.code));",
+                  "const b = pm.response.json(); const v = b.id;",
+                  "if (v) pm.environment.set('asignacion_id', v);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/admins/assignments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "admins",
+                "assignments"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"qa.nuevo.admin@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Revocar la asignación pendiente",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/404', () => pm.expect([200, 204, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/admins/assignments/{{asignacion_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "admins",
+                "assignments",
+                "{{asignacion_id}}"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "06 - Consultas deportista - club (HU-51)",
+      "item": [
+        {
+          "name": "Escribir al club (deportista)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/200/403/409', () => pm.expect([201, 200, 403, 409]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/consultas/me/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "consultas",
+                "me",
+                "messages"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"texto\": \"Hola, ¿hay cupos?\",\n  \"client_message_id\": \"{{$guid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Mis consultas a clubes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));",
+                  "const b = pm.response.json(); const first = (b.items || b)[0]; if (first && first.id) pm.environment.set('hilo_id', first.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/consultas/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "consultas",
+                "me"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Mensajes de mi consulta",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/404', () => pm.expect([200, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/consultas/me/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "consultas",
+                "me",
+                "messages"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Marcar mi consulta como leída",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/404', () => pm.expect([200, 204, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/consultas/me/read",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "consultas",
+                "me",
+                "read"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"hasta_id\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Bandeja de consultas del club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));",
+                  "const b = pm.response.json(); const first = (b.items || b)[0]; if (first && first.id) pm.environment.set('hilo_id', first.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/consultas",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "consultas"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Mensajes de una consulta (club)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/404', () => pm.expect([200, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/consultas/{{hilo_id}}/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "consultas",
+                "{{hilo_id}}",
+                "messages"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Responder una consulta como club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/200/404', () => pm.expect([201, 200, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/consultas/{{hilo_id}}/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "consultas",
+                "{{hilo_id}}",
+                "messages"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"texto\": \"Sí, quedan cupos\",\n  \"client_message_id\": \"{{$guid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Marcar una consulta como leída (club)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/404', () => pm.expect([200, 204, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/consultas/{{hilo_id}}/read",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "consultas",
+                "{{hilo_id}}",
+                "read"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"hasta_id\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Escribirle primero a un postulante",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/200/403/404/409', () => pm.expect([201, 200, 403, 404, 409]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/consultas/postulantes/{{player_id}}/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "consultas",
+                "postulantes",
+                "{{player_id}}",
+                "messages"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"texto\": \"Te contactamos por tu postulación\",\n  \"client_message_id\": \"{{$guid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "07 - Canales del club (G4)",
+      "item": [
+        {
+          "name": "Crear un canal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/402', () => pm.expect([201, 402]).to.include(pm.response.code));",
+                  "const b = pm.response.json(); const v = b.id;",
+                  "if (v) pm.environment.set('canal_id', v);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Anuncios\",\n  \"miembros_escriben\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Crear un segundo canal (402 en el plan Gratis)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/402', () => pm.expect([201, 402]).to.include(pm.response.code));",
+                  "if (pm.response.code === 402) pm.test('cuerpo LIMITE_PLAN', () => pm.expect(pm.response.json().codigo).to.eql('LIMITE_PLAN'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Otro\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Canales del club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Editar un canal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/404', () => pm.expect([200, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Anuncios oficiales\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Postulantes que aún no están en el canal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/404', () => pm.expect([200, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}/candidatos",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}",
+                "candidatos"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Agregar un postulante al canal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/404/409', () => pm.expect([200, 204, 404, 409]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}/miembros/{{player_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}",
+                "miembros",
+                "{{player_id}}"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Miembros de un canal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/404', () => pm.expect([200, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}/miembros",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}",
+                "miembros"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Escribir en un canal como club",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/200/404', () => pm.expect([201, 200, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}",
+                "messages"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"texto\": \"Bienvenidos\",\n  \"client_message_id\": \"{{$guid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Mensajes de un canal (administradores)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/404', () => pm.expect([200, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}",
+                "messages"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Marcar un canal como leído (club)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/404', () => pm.expect([200, 204, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}/read",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}",
+                "read"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"hasta_id\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Mis canales de clubes (miembro)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.expect([200]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/canales/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "canales",
+                "me"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Mensajes de un canal (miembro)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/403/404', () => pm.expect([200, 403, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/canales/{{canal_id}}/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "canales",
+                "{{canal_id}}",
+                "messages"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Escribir en un canal (miembro)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201/200/403/404', () => pm.expect([201, 200, 403, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/canales/{{canal_id}}/messages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "canales",
+                "{{canal_id}}",
+                "messages"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"texto\": \"Gracias\",\n  \"client_message_id\": \"{{$guid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Marcar un canal como leído (miembro)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/403/404', () => pm.expect([200, 204, 403, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/canales/{{canal_id}}/read",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "canales",
+                "{{canal_id}}",
+                "read"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"hasta_id\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Silenciar un canal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/403/404', () => pm.expect([200, 204, 403, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{player_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/canales/{{canal_id}}/mute",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "canales",
+                "{{canal_id}}",
+                "mute"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"silenciado\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Responder al aviso de inactividad",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/404/409', () => pm.expect([200, 204, 404, 409]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}/inactividad",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}",
+                "inactividad"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"decision\": \"mantener\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Sacar a alguien del canal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/404', () => pm.expect([200, 204, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}/miembros/{{player_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}",
+                "miembros",
+                "{{player_id}}"
+              ]
+            },
+            "description": ""
+          }
+        },
+        {
+          "name": "Eliminar un canal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200/204/404', () => pm.expect([200, 204, 404]).to.include(pm.response.code));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{club_admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/clubs/{{club_id}}/canales/{{canal_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clubs",
+                "{{club_id}}",
+                "canales",
+                "{{canal_id}}"
+              ]
+            },
+            "description": ""
+          }
+        }
+      ]
+    }
+  ]
+}

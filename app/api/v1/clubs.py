@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Query, status
 
-from app.api.dependencies import get_club_admin, get_club_service
+from app.api.dependencies import get_club_admin, get_club_service, get_current_actor
 from app.core.security import Actor
 from app.schemas.club import (
     ClubCreate,
@@ -79,6 +79,20 @@ def my_club(
     service: ClubService = Depends(get_club_service),
 ) -> ClubMio:
     return service.my_club(actor)
+
+
+@router.get(
+    "/plan-usage/me",
+    summary="Uso de mi plan en clubes (HU-54)",
+    description="Representante: convocatorias abiertas, comunicados de las últimas 24 h y canales de su club. "
+    "Deportista: postulaciones a convocatorias de las últimas 24 h. Cada recurso trae "
+    "{recurso, limite (null = sin límite), usado, ventana_horas, se_libera_en}.",
+)
+def my_plan_usage(
+    actor: Actor = Depends(get_current_actor),
+    service: ClubService = Depends(get_club_service),
+) -> dict:
+    return service.plan_usage(actor)
 
 
 @router.get(

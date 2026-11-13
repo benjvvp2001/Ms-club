@@ -67,6 +67,7 @@ tests/                    pruebas de la API con el repositorio mock
 | GET | `/api/v1/clubs/deportes` | Público | Catálogo de deportes activos (para filtros y para asociar). |
 | GET | `/api/v1/clubs/{id}` | Público | Perfil público del club. |
 | POST | `/api/v1/clubs` | `club_admin` sin club | Crea el club con su RUT; quien lo crea queda como `PRINCIPAL`. |
+| GET | `/api/v1/clubs/plan-usage/me` | `club_admin` o deportista | Uso del plan (HU-54): convocatorias abiertas, comunicados de 24 h y canales del club (representante) o postulaciones a convocatorias (deportista): `{recurso, limite, usado, ventana_horas, se_libera_en}`. Va antes de `/{id}` en el router. |
 | GET | `/api/v1/clubs/me` | `club_admin` | Panel de edición: el club que administro, activo o no, con `mi_rol`. Activa una asignación pendiente de mi correo. |
 | PATCH | `/api/v1/clubs/{id}` | admin del club | Edita el perfil y los deportes ofrecidos. |
 | PUT | `/api/v1/clubs/{id}/deportes/{deporte_id}` | admin del club | Asocia un deporte (idempotente). |
@@ -493,6 +494,16 @@ Las tablas `plan_suscripcion`, `transaccion_pago` y `suscripcion` (migraciones 0
 `sportmatch_clubs` sin uso**: las migraciones no se editan porque ya están aplicadas y el migrador las lee todas en
 orden, y no se borró ningún dato. Retirarlas queda como pendiente del equipo (`PENDIENTES.md`).
 
+
+## Límites del plan (HU-54)
+
+Los límites los define Ms-pago (`GET /internal/v1/entitlements/club/{id}`) y este servicio solo cuenta: **convocatorias abiertas**
+(2 en Gratis), **comunicados** (4 cada 24 h) y **canales** (1), más **postulaciones a convocatorias** de los deportistas (5 cada 24 h).
+Al alcanzar el límite responde **402** `{codigo: "LIMITE_PLAN", recurso, limite, usado, se_libera_en, detail}`, con el mismo estilo
+que Ms_activities y ms-machine; el gateway lo reenvía tal cual. Una postulación repetida sigue siendo 409 (no gasta cupo).
+**Fail-open:** si Ms-pago no responde o `PAYMENTS_SERVICE_URL`/`INTERNAL_SERVICE_TOKEN` no están configurados, la operación se
+permite y se registra un aviso (`EntitlementsClient.get`, en `app/services/entitlements_client.py`: es el único lugar que decide
+qué hacer ante una caída de pagos). Variables: `PAYMENTS_SERVICE_URL`, `PAYMENTS_TIMEOUT_SECONDS`, `ENTITLEMENTS_CACHE_SECONDS`.
 
 ## Base de datos y ejecución
 

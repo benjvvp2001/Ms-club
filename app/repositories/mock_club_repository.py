@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -112,11 +112,14 @@ class MockClubRepository:
 
     # -- directory ----------------------------------------------------------
 
-    def search_clubs(self, filters: ClubFilters) -> tuple[list[StoredClub], int]:
+    def search_clubs(
+        self, filters: ClubFilters, destacados: Collection[UUID] = ()
+    ) -> tuple[list[StoredClub], int]:
         matches = [
             club for club in self._clubs.values() if club.is_active and _matches(club, filters)
         ]
-        matches.sort(key=lambda club: (club.nombre.lower(), str(club.id)))
+        primeros = set(destacados)
+        matches.sort(key=lambda club: (club.id not in primeros, club.nombre.lower(), str(club.id)))
         start = (filters.page - 1) * filters.page_size
         page = matches[start : start + filters.page_size]
         return [_public(club) for club in page], len(matches)
@@ -1147,6 +1150,18 @@ class MockClubRepository:
                 )
             )
         return replace(comunicado)
+
+    def fechas_comunicados_desde(self, club_id: UUID, desde: datetime) -> list[datetime]:
+        return sorted(c.fecha_creacion for c in self._comunicados.values()
+                      if c.club_id == club_id and c.fecha_creacion > desde)
+
+    def fechas_postulaciones_desde(self, usuario_id: UUID, desde: datetime) -> list[datetime]:
+        return sorted(p["fecha_creacion"] for p in self._postulaciones.values()
+                      if p["usuario_id"] == usuario_id and p["fecha_creacion"] > desde)
+
+    def ya_postulo(self, convocatoria_id: UUID, usuario_id: UUID) -> bool:
+        return any(p["convocatoria_id"] == convocatoria_id and p["usuario_id"] == usuario_id
+                   for p in self._postulaciones.values())
 
     def list_comunicados_club(
         self, club_id: UUID, filters: ClubComunicadoFilters

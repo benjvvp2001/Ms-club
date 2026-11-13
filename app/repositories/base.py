@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -312,8 +313,11 @@ class ClubRepository(Protocol):
     Clubs always come with their active sports only.
     """
 
-    def search_clubs(self, filters: ClubFilters) -> tuple[list[StoredClub], int]:
-        """One page of active clubs ordered by name, plus the total that matches."""
+    def search_clubs(
+        self, filters: ClubFilters, destacados: Collection[UUID] = ()
+    ) -> tuple[list[StoredClub], int]:
+        """One page of active clubs, plus the total that matches. The clubs in `destacados`
+        (paid plan, HU-54) go first on every page; then by name."""
         ...
 
     def get_club(self, club_id: UUID, *, include_inactive: bool = False) -> StoredClub | None: ...
@@ -781,6 +785,20 @@ class ClubRepository(Protocol):
         self, club_id: UUID, filters: ClubComunicadoFilters
     ) -> tuple[list[StoredComunicado], int]:
         """The notices a club published, newest first."""
+        ...
+
+    # -- HU-54: plan limits (rolling windows over the existing tables) ------------------
+
+    def fechas_comunicados_desde(self, club_id: UUID, desde: datetime) -> list[datetime]:
+        """When the club published each notice after `desde`, oldest first."""
+        ...
+
+    def fechas_postulaciones_desde(self, usuario_id: UUID, desde: datetime) -> list[datetime]:
+        """When the athlete applied to each convocatoria after `desde`, oldest first."""
+        ...
+
+    def ya_postulo(self, convocatoria_id: UUID, usuario_id: UUID) -> bool:
+        """The athlete already applied to this convocatoria (a repeat is a 409, never a 402)."""
         ...
 
     def list_comunicados_usuario(

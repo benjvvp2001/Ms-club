@@ -14,6 +14,7 @@ from app.services.comunicado_service import ComunicadoService
 from app.services.consulta_service import ConsultaService
 from app.services.convocatoria_service import ConvocatoriaService
 from app.services.postulacion_service import PostulacionService
+from app.services.entitlements_client import EntitlementsClient
 from app.services.users_client import AccountNames, AthleteProfiles
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -30,11 +31,17 @@ def get_account_names(request: Request) -> AccountNames | None:
     return users if callable(getattr(users, "display_name", None)) else None
 
 
+def get_entitlements(request: Request) -> EntitlementsClient | None:
+    """HU-54: ms-pago, for plan limits and featured clubs. None = no limits (fail-open)."""
+    return getattr(request.app.state, "entitlements", None)
+
+
 def get_club_service(
     repository: ClubRepository = Depends(get_repository),
     names: AccountNames | None = Depends(get_account_names),
+    entitlements: EntitlementsClient | None = Depends(get_entitlements),
 ) -> ClubService:
-    return ClubService(repository, names, get_club_max_admins())
+    return ClubService(repository, names, get_club_max_admins(), entitlements)
 
 
 def get_administrador_service(
@@ -50,20 +57,25 @@ def get_consulta_service(
     return ConsultaService(repository, names)
 
 
-def get_canal_service(repository: ClubRepository = Depends(get_repository)) -> CanalService:
-    return CanalService(repository)
+def get_canal_service(
+    repository: ClubRepository = Depends(get_repository),
+    entitlements: EntitlementsClient | None = Depends(get_entitlements),
+) -> CanalService:
+    return CanalService(repository, entitlements=entitlements)
 
 
 def get_convocatoria_service(
     repository: ClubRepository = Depends(get_repository),
+    entitlements: EntitlementsClient | None = Depends(get_entitlements),
 ) -> ConvocatoriaService:
-    return ConvocatoriaService(repository)
+    return ConvocatoriaService(repository, entitlements)
 
 
 def get_comunicado_service(
     repository: ClubRepository = Depends(get_repository),
+    entitlements: EntitlementsClient | None = Depends(get_entitlements),
 ) -> ComunicadoService:
-    return ComunicadoService(repository)
+    return ComunicadoService(repository, entitlements)
 
 
 def get_users(request: Request) -> AthleteProfiles:
@@ -79,8 +91,9 @@ def get_postulacion_service(
     repository: ClubRepository = Depends(get_repository),
     users: AthleteProfiles = Depends(get_users),
     photos: AccountPhotos | None = Depends(get_photos),
+    entitlements: EntitlementsClient | None = Depends(get_entitlements),
 ) -> PostulacionService:
-    return PostulacionService(repository, users, photos)
+    return PostulacionService(repository, users, photos, entitlements)
 
 
 def get_current_actor(

@@ -31,6 +31,7 @@ from app.schemas.canal import (
 )
 from app.schemas.consulta import Lado, LeidoUpdate, MensajeCreate, MensajeFilters
 from app.services.authorization import club_not_found
+from app.services.entitlements_client import EntitlementsClient, LimitePlanError, limite
 
 # A kept channel goes this long before the next inactivity notice (G4).
 MANTENER = timedelta(days=30)
@@ -51,10 +52,13 @@ class CanalService:
     """
 
     def __init__(
-        self, repository: ClubRepository, clock: Callable[[], datetime] = _utcnow
+        self, repository: ClubRepository, clock: Callable[[], datetime] = _utcnow,
+        entitlements: EntitlementsClient | None = None,
     ) -> None:
         self._repository = repository
         self._clock = clock
+        # HU-54: plan limits read from ms-pago; None = only the technical cap (fail-open).
+        self._entitlements = entitlements
 
     # -- club side (administrators) ------------------------------------------------------
 
@@ -64,10 +68,17 @@ class CanalService:
 
     def create(self, actor: Actor, club_id: UUID, payload: CanalCreate) -> CanalClub:
         club = self._club(actor, club_id, writing=True)
+        # The plan's cap (free: 1) inside the technical one; the repository checks it atomically.
+        plan_max = limite(self._entitlements.get("club", club.id), "canales")[0] if self._entitlements else None
+        max_canales = MAX_CANALES if plan_max is None else min(plan_max, MAX_CANALES)
         result, canal = self._repository.create_canal(
             club.id, payload.nombre, payload.miembros_escriben,
-            max_canales=MAX_CANALES, max_miembros=MAX_MIEMBROS,
+            max_canales=max_canales, max_miembros=MAX_MIEMBROS,
         )
+        if (result == "sin_cupo" or canal is None) and max_canales < MAX_CANALES:
+            raise LimitePlanError(
+                "canales", max_canales, len(self._repository.list_canales_club(club.id)), None, None
+            )
         if result == "sin_cupo" or canal is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

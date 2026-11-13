@@ -23,6 +23,7 @@ from app.schemas.common import PAGE_SIZE_MAX, Deporte
 from app.schemas.convocatoria import ConvocatoriaFilters, ConvocatoriaRead
 from app.services.authorization import club_not_found, require_managed_club
 from app.services.convocatoria_service import to_convocatoria_read
+from app.services.entitlements_client import EntitlementsClient, uso
 from app.services.rut import normalizar_rut
 from app.services.users_client import ADMIN_NAME_FALLBACK, AccountNames, account_name
 
@@ -33,18 +34,24 @@ class ClubService:
         repository: ClubRepository,
         names: AccountNames | None = None,
         max_admins: int = CLUB_MAX_ADMINS_DEFAULT,
+        entitlements: EntitlementsClient | None = None,
     ) -> None:
         self._repository = repository
         # Ms_Users, for the administrator's name in club_administrador; optional.
         self._names = names
         self._max_admins = max_admins
+        # HU-54: ms-pago, to mark featured clubs (paid plan); optional.
+        self._entitlements = entitlements
 
     # -- public directory (HU-30) ---------------------------------------------
 
     def list_clubs(self, filters: ClubFilters) -> ClubPage:
-        clubs, total = self._repository.search_clubs(filters)
+        # HU-54: clubs with a paid plan go first on every page. The featured ids come in one call to
+        # ms-pago (cached) before paginating; if it does not answer, nobody goes first (fail-open).
+        destacados = self._entitlements.destacados("club") if self._entitlements else None
+        clubs, total = self._repository.search_clubs(filters, destacados or ())
         return ClubPage(
-            items=[_summary(club) for club in clubs],
+            items=[_summary(club, club.id in (destacados or ())) for club in clubs],
             total=total,
             page=filters.page,
             page_size=filters.page_size,
@@ -74,6 +81,26 @@ class ClubService:
         if club is None or admin is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aún no tienes un club.")
         return ClubMio(**_managed(club).model_dump(), mi_rol=admin.rol)
+
+    def plan_usage(self, actor: Actor) -> dict:
+        """HU-54: uso actual de los recursos limitados de ms-club ("Te quedan X de N"), con las mismas
+        consultas que el 402. Representante: los de su club; deportista: sus postulaciones a convocatorias."""
+        if actor.is_club_admin:
+            club = self._repository.get_club_by_admin(actor.id)
+            if club is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Aún no tienes un club.")
+            return {"tipo": "club", "id": str(club.id), **uso(self._entitlements, "club", club.id, {
+                "convocatorias_abiertas": lambda _: self._repository.search_convocatorias(
+                    ConvocatoriaFilters(club_id=club.id, estado="ABIERTA", page_size=1))[1],
+                "comunicados": lambda desde: self._repository.fechas_comunicados_desde(club.id, desde),
+                "canales": lambda _: len(self._repository.list_canales_club(club.id)),
+            })}
+        if actor.is_athlete:
+            return {"tipo": "usuario", "id": str(actor.id), **uso(self._entitlements, "usuario", actor.id, {
+                "postulaciones_convocatorias":
+                    lambda desde: self._repository.fechas_postulaciones_desde(actor.id, desde),
+            })}
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Esta cuenta no tiene límites de plan.")
 
     def _claim_asignacion(self, actor: Actor) -> bool:
         """Activate the oldest pending assignment of the actor's email (sección E).
@@ -190,8 +217,9 @@ def _short(descripcion: str | None) -> str | None:
     return descripcion
 
 
-def _summary(club: StoredClub) -> ClubSummary:
+def _summary(club: StoredClub, destacado: bool = False) -> ClubSummary:
     return ClubSummary(
+        es_destacado=destacado,
         id=club.id,
         nombre=club.nombre,
         descripcion_corta=_short(club.descripcion),
